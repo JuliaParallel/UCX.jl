@@ -1,17 +1,41 @@
 using Clang
 
-# LIBUCP_HEADERS are those headers to be wrapped.
-const LIBUCP_INCLUDE = joinpath(@__DIR__, "..", "deps", "usr", "include", "ucp", "api") |> normpath
-const LIBUCP_HEADERS = [joinpath(LIBUCP_INCLUDE, header) for header in readdir(LIBUCP_INCLUDE) if endswith(header, ".h")]
+UCS = joinpath(@__DIR__, "..", "deps", "usr", "include", "ucs") |> normpath
+UCS_INCLUDES = [joinpath(UCS, dir) for dir in readdir(UCS)]
+UCS_HEADERS = String[]
+for dir in UCS_INCLUDES
+    headers = [joinpath(dir, header) for header in readdir(dir) if endswith(header, ".h")]
+    append!(UCS_HEADERS, headers)
+end
 
-wc = init(; headers = LIBUCP_HEADERS,
-            output_file = joinpath(@__DIR__, "libucp_api.jl"),
-            common_file = joinpath(@__DIR__, "libucp_common.jl"),
-            clang_includes = vcat(LIBUCP_INCLUDE, CLANG_INCLUDE),
-            clang_args = ["-I", joinpath(LIBUCP_INCLUDE, "..", "..")],
+wc = init(; headers = UCS_HEADERS,
+            output_file = joinpath(@__DIR__, "libucs_api.jl"),
+            common_file = joinpath(@__DIR__, "libucs_common.jl"),
+            clang_includes = vcat(UCS_INCLUDES, CLANG_INCLUDE),
+            clang_args = ["-I", joinpath(UCS, "..")],
             header_wrapped = (root, current)->root == current,
-            header_library = x->"libucp",
+            header_library = x->"libucs",
             clang_diagnostics = true,
             )
-
 run(wc)
+
+
+function wrap_ucx_component(name)
+    INCLUDE = joinpath(@__DIR__, "..", "deps", "usr", "include", name, "api") |> normpath
+    HEADERS = [joinpath(INCLUDE, header) for header in readdir(INCLUDE) if endswith(header, ".h")]
+    
+    wc = init(; headers = HEADERS,
+                output_file = joinpath(@__DIR__, "lib$(name)_api.jl"),
+                common_file = joinpath(@__DIR__, "lib$(name)_common.jl"),
+                clang_includes = vcat(INCLUDE, CLANG_INCLUDE),
+                clang_args = ["-I", joinpath(INCLUDE, "..", "..")],
+                header_wrapped = (root, current)->root == current,
+                header_library = x->"lib$name",
+                clang_diagnostics = true,
+                )
+    
+    run(wc)
+end
+wrap_ucx_component("ucm")
+wrap_ucx_component("uct")
+wrap_ucx_component("ucp")
