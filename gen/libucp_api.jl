@@ -1,5 +1,5 @@
-# Julia wrapper for header: /home/vchuravy/src/UCX.jl/deps/usr/include/ucp/api/ucp.h
-# Automatically generated using Clang.jl wrap_c
+# Julia wrapper for header: ucp.h
+# Automatically generated using Clang.jl
 
 
 function ucp_config_read(env_prefix, filename, config_p)
@@ -106,6 +106,10 @@ function ucp_listener_destroy(listener)
     ccall((:ucp_listener_destroy, libucp), Cvoid, (ucp_listener_h,), listener)
 end
 
+function ucp_listener_query(listener, attr)
+    ccall((:ucp_listener_query, libucp), ucs_status_t, (ucp_listener_h, Ptr{ucp_listener_attr_t}), listener, attr)
+end
+
 function ucp_ep_create(worker, params, ep_p)
     ccall((:ucp_ep_create, libucp), ucs_status_t, (ucp_worker_h, Ptr{ucp_ep_params_t}, Ptr{ucp_ep_h}), worker, params, ep_p)
 end
@@ -138,6 +142,10 @@ function ucp_mem_query(memh, attr)
     ccall((:ucp_mem_query, libucp), ucs_status_t, (ucp_mem_h, Ptr{ucp_mem_attr_t}), memh, attr)
 end
 
+function ucp_mem_print_info(mem_size, context, stream)
+    ccall((:ucp_mem_print_info, libucp), Cvoid, (Cstring, ucp_context_h, Ptr{FILE}), mem_size, context, stream)
+end
+
 function ucp_mem_advise(context, memh, params)
     ccall((:ucp_mem_advise, libucp), ucs_status_t, (ucp_context_h, ucp_mem_h, Ptr{ucp_mem_advise_params_t}), context, memh, params)
 end
@@ -160,6 +168,18 @@ end
 
 function ucp_rkey_destroy(rkey)
     ccall((:ucp_rkey_destroy, libucp), Cvoid, (ucp_rkey_h,), rkey)
+end
+
+function ucp_worker_set_am_handler(worker, id, cb, arg, flags)
+    ccall((:ucp_worker_set_am_handler, libucp), ucs_status_t, (ucp_worker_h, UInt16, ucp_am_callback_t, Ptr{Cvoid}, UInt32), worker, id, cb, arg, flags)
+end
+
+function ucp_am_send_nb(ep, id, buffer, count, datatype, cb, flags)
+    ccall((:ucp_am_send_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, UInt16, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_send_callback_t, UInt32), ep, id, buffer, count, datatype, cb, flags)
+end
+
+function ucp_am_data_release(worker, data)
+    ccall((:ucp_am_data_release, libucp), Cvoid, (ucp_worker_h, Ptr{Cvoid}), worker, data)
 end
 
 function ucp_stream_send_nb(ep, buffer, count, datatype, cb, flags)
@@ -265,8 +285,8 @@ end
 function ucp_worker_flush_nb(worker, flags, cb)
     ccall((:ucp_worker_flush_nb, libucp), ucs_status_ptr_t, (ucp_worker_h, UInt32, ucp_send_callback_t), worker, flags, cb)
 end
-# Julia wrapper for header: /home/vchuravy/src/UCX.jl/deps/usr/include/ucp/api/ucp_compat.h
-# Automatically generated using Clang.jl wrap_c
+# Julia wrapper for header: ucp_compat.h
+# Automatically generated using Clang.jl
 
 
 function ucp_request_is_completed(request)
@@ -340,9 +360,9 @@ end
 function ucp_ep_modify_nb(ep, params)
     ccall((:ucp_ep_modify_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{ucp_ep_params_t}), ep, params)
 end
-# Julia wrapper for header: /home/vchuravy/src/UCX.jl/deps/usr/include/ucp/api/ucp_def.h
-# Automatically generated using Clang.jl wrap_c
+# Julia wrapper for header: ucp_def.h
+# Automatically generated using Clang.jl
 
-# Julia wrapper for header: /home/vchuravy/src/UCX.jl/deps/usr/include/ucp/api/ucp_version.h
-# Automatically generated using Clang.jl wrap_c
+# Julia wrapper for header: ucp_version.h
+# Automatically generated using Clang.jl
 

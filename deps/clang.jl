@@ -1,6 +1,7 @@
 using Clang
+using UCX_jll
 
-UCS = joinpath(@__DIR__, "..", "deps", "usr", "include", "ucs") |> normpath
+UCS = joinpath(UCX_jll.artifact_dir, "include", "ucs") |> normpath
 UCS_INCLUDES = [joinpath(UCS, dir) for dir in readdir(UCS)]
 UCS_HEADERS = String[]
 for dir in UCS_INCLUDES
@@ -21,7 +22,7 @@ run(wc)
 
 
 function wrap_ucx_component(name)
-    INCLUDE = joinpath(@__DIR__, "..", "deps", "usr", "include", name, "api") |> normpath
+    INCLUDE = joinpath(UCX_jll.artifact_dir, "include", name, "api") |> normpath
     HEADERS = [joinpath(INCLUDE, header) for header in readdir(INCLUDE) if endswith(header, ".h")]
     
     wc = init(; headers = HEADERS,

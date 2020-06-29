@@ -1,8 +1,5 @@
 module API
-    const ext = joinpath(@__DIR__, "..", "deps", "ext.jl")
-    isfile(ext) || error("UCX.jl has not been built, please run Pkg.build(\"UCX\").")
-    include(ext)
-
+    using UCX_jll
     using CEnum
     include("ctypes.jl")
 
