@@ -198,6 +198,7 @@ struct ucp_worker_params
 end
 
 const ucp_worker_params_t = ucp_worker_params
+const sockaddr_storage = sockaddr
 
 struct ucp_listener_attr
     field_mask::UInt64
