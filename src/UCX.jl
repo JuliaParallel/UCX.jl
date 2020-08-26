@@ -110,12 +110,27 @@ mutable struct UCXWorker
     end
 end
 
+function progress(worker::UCXWorker)
+    while API.ucp_worker_progress(worker.handle) != 0
+        yield() # or just pass?
+    end
+end
+
+function arm(worker::UCXWorker)
+    status = API.ucp_worker_arm(worker.handle)
+    if status == API.UCS_ERR_BUSY
+        return false
+    end
+    @assert status == API.UCS_OK
+    return true
+end
+
 mutable struct UCXEndpoint
     handle::API.ucp_ep_h
     worker::UCXWorker
 
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
-        endpoint = new(worker, handle)
+        endpoint = new(handle, worker)
         finalizer(endpoint) do endpoint
             API.ucp_ep_destroy(endpoint.handle)
         end
@@ -123,7 +138,55 @@ mutable struct UCXEndpoint
     end
 end
 
-function _listener_callback(conn_request::API.ucp_conn_request, args::Ptr{Cvoid})
+function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
+    field_mask = API.UCP_EP_PARAM_FIELD_FLAGS |
+                 API.UCP_EP_PARAM_FIELD_SOCK_ADDR
+    flags      = API.UCP_EP_PARAMS_FLAGS_CLIENT_SERVER
+    sockaddr   = Ref(API.IP.sockaddr_in(InetAddr(ip, port)))
+
+    r_handle = Ref{API.ucp_ep_h}()
+    GC.@preserve sockaddr begin
+        ptr = Base.unsafe_convert(Ptr{API.sockaddr}, sockaddr)
+        ucs_sockaddr = API.ucs_sock_addr(ptr, sizeof(sockaddr))
+
+        params = Ref{API.ucp_ep_params}()
+        memzero!(params)
+        set!(params, :field_mask,   field_mask)
+        set!(params, :sockaddr,     ucs_sockaddr)
+        set!(params, :flags,        flags)
+    
+        status = API.ucp_ep_create(worker.handle, params, r_handle)
+        @assert status == API.UCS_OK
+    end
+
+    UCXEndpoint(worker, r_handle[])
+end
+
+struct UCXConnectionRequest
+    handle::API.ucp_conn_request_h
+end
+
+function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
+    field_mask = API.UCP_EP_PARAM_FIELD_FLAGS |
+                 API.UCP_EP_PARAM_FIELD_CONN_REQUEST
+    flags      = API.UCP_EP_PARAMS_FLAGS_NO_LOOPBACK
+
+    params = Ref{API.ucp_ep_params}()
+    memzero!(params)
+    set!(params, :field_mask,   field_mask)
+    set!(params, :conn_request, conn_request.handle)
+    set!(params, :flags,        flags)
+
+    r_handle = Ref{API.ucp_ep_h}()
+    status = API.ucp_ep_create(worker.handle, params, r_handle)
+    @assert status == API.UCS_OK
+
+
+    UCXEndpoint(worker, r_handle[])
+end
+
+# Figure out from which thread this callback is called.
+function _listener_callback(conn_request::API.ucp_conn_request_h, args::Ptr{Cvoid})
     @info "Listener callback called"
     nothing
 end
@@ -134,17 +197,16 @@ mutable struct UCXListener
     port::Cint
 
     function UCXListener(worker::UCXWorker, port)
-        ip = IPv4(API.IP.INADDR_ANY)
-        sockaddr = Ref(API.IP.sockaddr_in(InetAddr(ip, port)))
-        r_handle = Ref{API.ucp_listener_h}()
-
+        field_mask   = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
+                       API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
+        sockaddr     = Ref(API.IP.sockaddr_in(InetAddr(IPv4(API.IP.INADDR_ANY), port)))
         conn_handler = API.ucp_listener_conn_handler(@cfunction(_listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})), C_NULL)
 
+        r_handle = Ref{API.ucp_listener_h}()
         GC.@preserve sockaddr begin
             ptr = Base.unsafe_convert(Ptr{API.sockaddr}, sockaddr)
             ucs_sockaddr = API.ucs_sock_addr(ptr, sizeof(sockaddr))
-            field_mask = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
-                         API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
+
 
             params = Ref{API.ucp_listener_params}()
             memzero!(params)
