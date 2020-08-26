@@ -60,9 +60,9 @@ mutable struct UCXContext
                      API.UCP_FEATURE_WAKEUP |
                      API.UCP_FEATURE_STREAM
         
-        # TODO requests
-        request_size = 0
-        request_init = C_NULL
+        # # TODO requests
+        # request_size = 0
+        # request_init = C_NULL
         params = Ref{API.ucp_params}()
         memzero!(params)
         set!(params, :field_mask, field_mask)
@@ -123,6 +123,11 @@ mutable struct UCXEndpoint
     end
 end
 
+function _listener_callback(conn_request::API.ucp_conn_request, args::Ptr{Cvoid})
+    @info "Listener callback called"
+    nothing
+end
+
 mutable struct UCXListener
     handle::API.ucp_listener_h
     worker::UCXWorker
@@ -133,15 +138,19 @@ mutable struct UCXListener
         sockaddr = Ref(API.IP.sockaddr_in(InetAddr(ip, port)))
         r_handle = Ref{API.ucp_listener_h}()
 
+        conn_handler = API.ucp_listener_conn_handler(@cfunction(_listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})), C_NULL)
+
         GC.@preserve sockaddr begin
             ptr = Base.unsafe_convert(Ptr{API.sockaddr}, sockaddr)
             ucs_sockaddr = API.ucs_sock_addr(ptr, sizeof(sockaddr))
-            field_mask = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR
+            field_mask = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
+                         API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
 
             params = Ref{API.ucp_listener_params}()
             memzero!(params)
             set!(params, :field_mask, field_mask)
             set!(params, :sockaddr, ucs_sockaddr)
+            set!(params, :conn_handler, conn_handler)
 
             status = API.ucp_listener_create(worker.handle, params, r_handle)
             @assert status === API.UCS_OK
