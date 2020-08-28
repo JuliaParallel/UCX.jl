@@ -23,6 +23,13 @@ end
     val
 end
 
+uintptr_t(ptr::Ptr) = reinterpret(UInt, ptr)
+uintptr_t(status::API.ucs_status_t) = reinterpret(UInt, convert(Int, status))
+
+UCS_PTR_STATUS(ptr::Ptr{Cvoid}) = API.ucs_status_t(reinterpret(UInt, ptr)) 
+UCS_PTR_IS_ERR(ptr::Ptr{Cvoid}) = uintptr_t(ptr) >= uintptr_t(API.UCS_ERR_LAST)
+UCS_PTR_IS_PTR(ptr::Ptr{Cvoid}) = (uintptr_t(ptr) - 1) < (uintptr_t(API.UCS_ERR_LAST) - 1)
+
 struct UCXError
     ctx::String
     status::API.ucs_status_t
@@ -49,24 +56,19 @@ mutable struct UCXContext
     handle::API.ucp_context_h
 
     function UCXContext()
-        field_mask = API.UCP_PARAM_FIELD_FEATURES # |
-                    #  API.UCP_PARAM_FIELD_REQUEST_SIZE |
-                    #  API.UCP_PARAM_FIELD_REQUEST_INIT
+        field_mask   = API.UCP_PARAM_FIELD_FEATURES
 
         # We always request UCP_FEATURE_WAKEUP even when in blocking mode
         # See <https://github.com/rapidsai/ucx-py/pull/377>
         # There is also AM (atomic) and RMA features
-        features   = API.UCP_FEATURE_TAG |
-                     API.UCP_FEATURE_WAKEUP |
-                     API.UCP_FEATURE_STREAM
-        
-        # # TODO requests
-        # request_size = 0
-        # request_init = C_NULL
+        features     = API.UCP_FEATURE_TAG |
+                       API.UCP_FEATURE_WAKEUP |
+                       API.UCP_FEATURE_STREAM
+
         params = Ref{API.ucp_params}()
         memzero!(params)
-        set!(params, :field_mask, field_mask)
-        set!(params, :features, features)
+        set!(params, :field_mask,   field_mask)
+        set!(params, :features,     features)
 
         config = C_NULL
         # TODO config
@@ -90,12 +92,12 @@ mutable struct UCXWorker
     context::UCXContext
 
     function UCXWorker(context::UCXContext)
-        field_mask = API.UCP_WORKER_PARAM_FIELD_THREAD_MODE
+        field_mask  = API.UCP_WORKER_PARAM_FIELD_THREAD_MODE
         thread_mode = API.UCS_THREAD_MODE_MULTI
 
         params = Ref{API.ucp_worker_params}()
         memzero!(params)
-        set!(params, :field_mask, field_mask)
+        set!(params, :field_mask,  field_mask)
         set!(params, :thread_mode, thread_mode)
 
         r_handle = Ref{API.ucp_worker_h}()
@@ -125,17 +127,26 @@ function arm(worker::UCXWorker)
     return true
 end
 
+struct UCXConnectionRequest
+    handle::API.ucp_conn_request_h
+end
+
 mutable struct UCXEndpoint
     handle::API.ucp_ep_h
     worker::UCXWorker
+    open::Bool
 
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
-        endpoint = new(handle, worker)
+        endpoint = new(handle, worker, true)
         finalizer(endpoint) do endpoint
             API.ucp_ep_destroy(endpoint.handle)
         end
         endpoint
     end
+end
+
+function Base.isopen(ep::UCXEndpoint)
+    ep.open
 end
 
 function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
@@ -162,10 +173,6 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
     UCXEndpoint(worker, r_handle[])
 end
 
-struct UCXConnectionRequest
-    handle::API.ucp_conn_request_h
-end
-
 function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     field_mask = API.UCP_EP_PARAM_FIELD_FLAGS |
                  API.UCP_EP_PARAM_FIELD_CONN_REQUEST
@@ -181,13 +188,21 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     status = API.ucp_ep_create(worker.handle, params, r_handle)
     @assert status == API.UCS_OK
 
-
     UCXEndpoint(worker, r_handle[])
 end
 
-# Figure out from which thread this callback is called.
-function _listener_callback(conn_request::API.ucp_conn_request_h, args::Ptr{Cvoid})
-    @info "Listener callback called"
+function process_messages(ep::UCXEndpoint)
+    @info "Hello from worker thread"
+    # while isopen(ep)
+    #     progress(ep.worker)  
+    # end
+    nothing
+end
+
+function listener_callback(conn_request_h::API.ucp_conn_request_h, args::Ptr{Cvoid})
+    conn_request = UCXConnectionRequest(conn_request_h)
+    worker = Base.unsafe_pointer_to_objref(args)::UCXWorker
+    Threads.@spawn process_messages(UCXEndpoint($worker, $conn_request))
     nothing
 end
 
@@ -200,13 +215,14 @@ mutable struct UCXListener
         field_mask   = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
                        API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
         sockaddr     = Ref(API.IP.sockaddr_in(InetAddr(IPv4(API.IP.INADDR_ANY), port)))
-        conn_handler = API.ucp_listener_conn_handler(@cfunction(_listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})), C_NULL)
+        worker_ptr   = Base.pointer_from_objref(worker)
+        callback     = @cfunction(listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid}))
+        conn_handler = API.ucp_listener_conn_handler(callback, worker_ptr)
 
         r_handle = Ref{API.ucp_listener_h}()
         GC.@preserve sockaddr begin
             ptr = Base.unsafe_convert(Ptr{API.sockaddr}, sockaddr)
             ucs_sockaddr = API.ucs_sock_addr(ptr, sizeof(sockaddr))
-
 
             params = Ref{API.ucp_listener_params}()
             memzero!(params)
@@ -222,7 +238,102 @@ mutable struct UCXListener
     end
 end
 
+function reject(listener::UCXListener, conn_request::UCXConnectionRequest)
+    status = API.ucp_listener_reject(listener.handle, conn_request.handle)
+    @assert status === API.UCS_OK
+end
+
+function ucp_dt_make_contig(elem_size)
+    ((elem_size%API.ucp_datatype_t) << convert(API.ucp_datatype_t, API.UCP_DATATYPE_SHIFT)) | API.UCP_DATATYPE_CONTIG
+end
+
+function send_callback(request::Ptr{Cvoid}, status::API.ucs_status_t)
+    nothing
+end
+
+function recv_callback(request::Ptr{Cvoid}, status::API.ucs_status_t, info::Ptr{API.ucp_tag_recv_info_t})
+    nothing
+end
 
 
+# Current implementation is blocking
+function send(ep::UCXEndpoint, buffer, nbytes, tag)
+    data = pointer(buffer)
+    # dt = ucp_dt_make_contig(sizeof(eltype(buffer)))
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
+    ptr = API.ucp_tag_send_nb(ep.handle, data, nbytes, dt, tag, cb)
+
+    if ptr === C_NULL
+        return API.UCS_OK
+    elseif UCS_PTR_IS_ERR(ptr)
+        return UCS_PTR_STATUS(ptr)
+    else
+        status = API.ucp_request_check_status(ptr)
+        while(status === API.UCS_INPROGRESS)
+            progress(ep.worker)
+            status = API.ucp_request_check_status(ptr)
+        end
+        API.ucp_request_free(ptr)
+        return status
+    end
+end
+
+function recv(ep::UCXEndpoint, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp_tag_t))
+    data = pointer(buffer)
+    dt = ucp_dt_make_contig(1)
+    cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}))
+
+    ptr = API.ucp_tag_recv_nb(ep.handle, data, nbytes, dt, tag, tag_mask, cb)
+    if ptr === C_NULL
+        return API.UCS_OK
+    elseif UCS_PTR_IS_ERR(ptr)
+        return UCS_PTR_STATUS(ptr)
+    else
+        status = API.ucp_request_check_status(ptr)
+        while(status === API.UCS_INPROGRESS)
+            progress(ep.worker)
+            status = API.ucp_request_check_status(ptr)
+        end
+        API.ucp_request_free(ptr)
+        return status
+    end
+end
+
+struct UCXMessage
+    handle::API.ucp_tag_message_h
+    info::API.ucp_tag_recv_info_t
+end
+
+function probe(worker::UCXWorker, tag, tag_mask=~zero(UCX.API.ucp_tag_t), remove=true)
+    info = Ref{API.ucp_tag_recv_info_t}()
+    message_h = API.ucp_tag_probe_nb(worker.handle, tag, tag_mask, remove, info)
+    if message_h === C_NULL
+        return nothing
+    else
+        return UCXMessage(message_h, info[])
+    end
+end
+
+function recv(worker::UCXWorker, msg::UCXMessage, buffer, nbytes)
+    data = pointer(buffer)
+    dt = ucp_dt_make_contig(sizeof(eltype(buffer)))
+    cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}))
+
+    ptr = API.ucp_tag_msg_recv_nb(worker.handle, data, nbytes, dt, msg.handle, cb)
+    if ptr === C_NULL
+        return API.UCS_OK
+    elseif UCS_PTR_IS_ERR(ptr)
+        return UCS_PTR_STATUS(ptr)
+    else
+        status = API.ucp_request_check_status(ptr)
+        while(status === API.UCS_INPROGRESS)
+            progress(ep.worker)
+            status = API.ucp_request_check_status(ptr)
+        end
+        API.ucp_request_free(ptr)
+        return status
+    end
+end
 
 end
