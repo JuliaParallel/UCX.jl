@@ -11,10 +11,10 @@ function echo_server(ep::UCXEndpoint)
     size = Int[0]
     recv(ep.worker, size, sizeof(Int), 777)
     @info "recv size" size[1]
-    data = Array{UInt8}(size[1])
+    data = Array{UInt8}(undef, size[1])
     recv(ep.worker, data, sizeof(data), 777)
     @info "recv data"
-    send(ep, data, sizeof(data, 777))
+    send(ep, data, sizeof(data), 777)
     @info "Echo!"
 end
 
@@ -26,10 +26,12 @@ function start_server()
         conn_request = UCX.UCXConnectionRequest(conn_request_h)
         Threads.@spawn begin
             @info "hello from thread"
+            # TODO: Errors in echo_server are not shown...
             try
                 echo_server(UCXEndpoint($worker, $conn_request))
             catch err
                 showerror(err, catch_backtrace())
+                exit(-1)
             end
         end
         nothing
@@ -53,6 +55,7 @@ function start_client()
     UCX.send(ep, Int[sizeof(data)], sizeof(Int), 777)
     @info "sending data"
     UCX.send(ep, data, sizeof(data), 777)
+    @info "recv data"
     buffer = Array{UInt8}(undef, sizeof(data))
     UCX.recv(worker, buffer, sizeof(buffer), 777)
     @assert String(buffer) == data
