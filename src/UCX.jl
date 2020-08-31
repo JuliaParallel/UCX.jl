@@ -256,45 +256,50 @@ end
 
 # Current implementation is blocking
 function send(ep::UCXEndpoint, buffer, nbytes, tag)
-    data = pointer(buffer)
-    # dt = ucp_dt_make_contig(sizeof(eltype(buffer)))
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
-    ptr = API.ucp_tag_send_nb(ep.handle, data, nbytes, dt, tag, cb)
 
-    if ptr === C_NULL
-        return API.UCS_OK
-    elseif UCS_PTR_IS_ERR(ptr)
-        return UCS_PTR_STATUS(ptr)
-    else
-        status = API.ucp_request_check_status(ptr)
-        while(status === API.UCS_INPROGRESS)
-            progress(ep.worker)
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+
+        ptr = API.ucp_tag_send_nb(ep.handle, data, nbytes, dt, tag, cb)
+
+        if ptr === C_NULL
+            return API.UCS_OK
+        elseif UCS_PTR_IS_ERR(ptr)
+            return UCS_PTR_STATUS(ptr)
+        else
             status = API.ucp_request_check_status(ptr)
+            while(status === API.UCS_INPROGRESS)
+                progress(ep.worker) || yield()
+                status = API.ucp_request_check_status(ptr)
+            end
+            API.ucp_request_free(ptr)
+            return status
         end
-        API.ucp_request_free(ptr)
-        return status
     end
 end
 
-function recv(ep::UCXEndpoint, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp_tag_t))
-    data = pointer(buffer)
+function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp_tag_t))
     dt = ucp_dt_make_contig(1)
     cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}))
 
-    ptr = API.ucp_tag_recv_nb(ep.handle, data, nbytes, dt, tag, tag_mask, cb)
-    if ptr === C_NULL
-        return API.UCS_OK
-    elseif UCS_PTR_IS_ERR(ptr)
-        return UCS_PTR_STATUS(ptr)
-    else
-        status = API.ucp_request_check_status(ptr)
-        while(status === API.UCS_INPROGRESS)
-            progress(ep.worker)
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        ptr = API.ucp_tag_recv_nb(worker.handle, data, nbytes, dt, tag, tag_mask, cb)
+        if ptr === C_NULL
+            return API.UCS_OK
+        elseif UCS_PTR_IS_ERR(ptr)
+            return UCS_PTR_STATUS(ptr)
+        else
             status = API.ucp_request_check_status(ptr)
+            while(status === API.UCS_INPROGRESS)
+                progress(ep.worker) || yield()
+                status = API.ucp_request_check_status(ptr)
+            end
+            API.ucp_request_free(ptr)
+            return status
         end
-        API.ucp_request_free(ptr)
-        return status
     end
 end
 
@@ -314,23 +319,26 @@ function probe(worker::UCXWorker, tag, tag_mask=~zero(UCX.API.ucp_tag_t), remove
 end
 
 function recv(worker::UCXWorker, msg::UCXMessage, buffer, nbytes)
-    data = pointer(buffer)
     dt = ucp_dt_make_contig(sizeof(eltype(buffer)))
     cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}))
 
-    ptr = API.ucp_tag_msg_recv_nb(worker.handle, data, nbytes, dt, msg.handle, cb)
-    if ptr === C_NULL
-        return API.UCS_OK
-    elseif UCS_PTR_IS_ERR(ptr)
-        return UCS_PTR_STATUS(ptr)
-    else
-        status = API.ucp_request_check_status(ptr)
-        while(status === API.UCS_INPROGRESS)
-            progress(ep.worker)
+    GC.@preserve data begin
+        data = pointer(buffer)
+
+        ptr = API.ucp_tag_msg_recv_nb(worker.handle, data, nbytes, dt, msg.handle, cb)
+        if ptr === C_NULL
+            return API.UCS_OK
+        elseif UCS_PTR_IS_ERR(ptr)
+            return UCS_PTR_STATUS(ptr)
+        else
             status = API.ucp_request_check_status(ptr)
+            while(status === API.UCS_INPROGRESS)
+                progress(ep.worker) || yield()
+                status = API.ucp_request_check_status(ptr)
+            end
+            API.ucp_request_free(ptr)
+            return status
         end
-        API.ucp_request_free(ptr)
-        return status
     end
 end
 
