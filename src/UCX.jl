@@ -113,9 +113,7 @@ mutable struct UCXWorker
 end
 
 function progress(worker::UCXWorker)
-    while API.ucp_worker_progress(worker.handle) != 0
-        yield() # or just pass?
-    end
+    API.ucp_worker_progress(worker.handle) !== 0
 end
 
 function arm(worker::UCXWorker)
