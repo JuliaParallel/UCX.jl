@@ -189,18 +189,7 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     UCXEndpoint(worker, r_handle[])
 end
 
-function process_messages(ep::UCXEndpoint)
-    @info "Hello from worker thread"
-    # while isopen(ep)
-    #     progress(ep.worker)  
-    # end
-    nothing
-end
-
 function listener_callback(conn_request_h::API.ucp_conn_request_h, args::Ptr{Cvoid})
-    conn_request = UCXConnectionRequest(conn_request_h)
-    worker = Base.unsafe_pointer_to_objref(args)::UCXWorker
-    Threads.@spawn process_messages(UCXEndpoint($worker, $conn_request))
     nothing
 end
 
@@ -209,13 +198,13 @@ mutable struct UCXListener
     worker::UCXWorker
     port::Cint
 
-    function UCXListener(worker::UCXWorker, port)
+    function UCXListener(worker::UCXWorker, port, 
+                         callback::Union{Ptr{Cvoid}, Base.CFunction} = @cfunction(listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})),
+                         args::Ptr{Cvoid} = C_NULL)
         field_mask   = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
                        API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
         sockaddr     = Ref(API.IP.sockaddr_in(InetAddr(IPv4(API.IP.INADDR_ANY), port)))
-        worker_ptr   = Base.pointer_from_objref(worker)
-        callback     = @cfunction(listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid}))
-        conn_handler = API.ucp_listener_conn_handler(callback, worker_ptr)
+        conn_handler = API.ucp_listener_conn_handler(Base.unsafe_convert(Ptr{Cvoid}, callback), args)
 
         r_handle = Ref{API.ucp_listener_h}()
         GC.@preserve sockaddr begin
