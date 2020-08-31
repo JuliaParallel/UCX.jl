@@ -260,7 +260,8 @@ function send(ep::UCXEndpoint, buffer, nbytes, tag)
         else
             status = API.ucp_request_check_status(ptr)
             while(status === API.UCS_INPROGRESS)
-                progress(ep.worker) || yield()
+                progress(ep.worker)
+                yield()
                 status = API.ucp_request_check_status(ptr)
             end
             API.ucp_request_free(ptr)
@@ -283,7 +284,8 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
         else
             status = API.ucp_request_check_status(ptr)
             while(status === API.UCS_INPROGRESS)
-                progress(ep.worker) || yield()
+                progress(worker)
+                yield()
                 status = API.ucp_request_check_status(ptr)
             end
             API.ucp_request_free(ptr)
@@ -322,7 +324,8 @@ function recv(worker::UCXWorker, msg::UCXMessage, buffer, nbytes)
         else
             status = API.ucp_request_check_status(ptr)
             while(status === API.UCS_INPROGRESS)
-                progress(ep.worker) || yield()
+                progress(ep.worker)
+                yield()
                 status = API.ucp_request_check_status(ptr)
             end
             API.ucp_request_free(ptr)
