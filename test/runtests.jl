@@ -11,7 +11,7 @@ using UCX
 
     @testset "Client-Server" begin
         script = joinpath(examples_dir, "client_server.jl")
-        launch(role, n=1) = run(pipeline(`$cmd $script $role $n`, stderr=stderr), wait=false)
+        launch(role, n=1) = run(pipeline(`$cmd $script $role $n`, stderr=stderr, stdout=stdout), wait=false)
         server = launch("server")
         client = launch("client")
 
@@ -21,7 +21,7 @@ using UCX
 
     @testset "Client-Server Stream" begin
         script = joinpath(examples_dir, "client_server_stream.jl")
-        launch(role, n=1) = run(pipeline(`$cmd $script $role $n`, stderr=stderr), wait=false)
+        launch(role, n=1) = run(pipeline(`$cmd $script $role $n`, stderr=stderr, stdout=stdout), wait=false)
         server = launch("server")
         client = launch("client")
 
