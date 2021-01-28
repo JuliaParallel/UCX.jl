@@ -11,11 +11,17 @@ using UCX
 
     @testset "Client-Server" begin
         script = joinpath(examples_dir, "client_server.jl")
-        launch(role, n=1) = run(pipeline(`$cmd $script $role $n`, stderr=stderr), wait=false)
-        server = launch("server")
-        client = launch("client")
+        launch(n) = run(pipeline(`$cmd $script test $n`, stderr=stderr, stdout=stdout), wait=false)
+        @test success(launch(1))
+        @test success(launch(2))
+        @test success(launch(3))
+    end
 
-        @test success(client)
-        @test success(server)
+    @testset "Client-Server Stream" begin
+        script = joinpath(examples_dir, "client_server_stream.jl")
+        launch(n) = run(pipeline(`$cmd $script test $n`, stderr=stderr, stdout=stdout), wait=false)
+        @test success(launch(1))
+        @test success(launch(2))
+        @test success(launch(3))
     end
 end

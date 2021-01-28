@@ -2,7 +2,7 @@ using UCX
 using Sockets
 
 using UCX: UCXEndpoint
-using UCX: recv, send
+using UCX: recv, send, stream_recv, stream_send
 
 using Base.Threads
 
@@ -13,8 +13,8 @@ function echo_server(ep::UCXEndpoint)
     size = Int[0]
     recv(ep.worker, size, sizeof(Int), 777)
     data = Array{UInt8}(undef, size[1])
-    recv(ep.worker, data, sizeof(data), 777)
-    send(ep, data, sizeof(data), 777)
+    stream_recv(ep, data, sizeof(data))
+    stream_send(ep, data, sizeof(data))
     atomic_sub!(expected_clients, 1)
 end
 
@@ -37,7 +37,6 @@ function start_server(ready=Event())
     end
     cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
     listener = UCX.UCXListener(worker, port, cb)
-
     notify(ready)
     while expected_clients[] > 0
         UCX.progress(worker)
@@ -53,9 +52,9 @@ function start_client()
 
     data = "Hello world"
     send(ep, Int[sizeof(data)], sizeof(Int), 777)
-    send(ep, data, sizeof(data), 777)
+    stream_send(ep, data, sizeof(data))
     buffer = Array{UInt8}(undef, sizeof(data))
-    recv(worker, buffer, sizeof(buffer), 777)
+    stream_recv(ep, buffer, sizeof(buffer))
     @assert String(buffer) == data
     exit(0)
 end
@@ -79,3 +78,4 @@ if !isinteractive()
         end
     end
 end
+d
