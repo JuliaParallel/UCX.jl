@@ -18,4 +18,14 @@ using UCX
         @test success(client)
         @test success(server)
     end
+
+    @testset "Client-Server Stream" begin
+        script = joinpath(examples_dir, "client_server_stream.jl")
+        launch(role, n=1) = run(pipeline(`$cmd $script $role $n`, stderr=stderr), wait=false)
+        server = launch("server")
+        client = launch("client")
+
+        @test success(client)
+        @test success(server)
+    end
 end

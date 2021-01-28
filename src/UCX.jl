@@ -316,6 +316,31 @@ function recv(worker::UCXWorker, msg::UCXMessage, buffer, nbytes)
     end
 end
 
+# UCX stream interface
 
+function stream_send(ep::UCXEndpoint, buffer, nbytes)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
 
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+
+        ptr = API.ucp_stream_send_nb(ep.handle, data, nbytes, dt, cb, #=flags=# 0)
+        return handle_request(ep, ptr)
+    end
 end
+
+function stream_recv(ep::UCXEndpoint, buffer, nbytes)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
+
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+
+        length = Ref{Csize_t}(0)
+        ptr = API.ucp_stream_recv_nb(ep.handle, data, nbytes, dt, cb, length, API.UCP_STREAM_RECV_FLAG_WAITALL)
+        return handle_request(ep, ptr)
+    end
+end
+
+end #module
