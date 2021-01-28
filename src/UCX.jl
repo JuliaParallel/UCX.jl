@@ -234,6 +234,10 @@ function ucp_dt_make_contig(elem_size)
     ((elem_size%API.ucp_datatype_t) << convert(API.ucp_datatype_t, API.UCP_DATATYPE_SHIFT)) | API.UCP_DATATYPE_CONTIG
 end
 
+##
+# UCX tagged send and receive
+##
+
 function send_callback(request::Ptr{Cvoid}, status::API.ucs_status_t)
     nothing
 end
@@ -242,8 +246,26 @@ function recv_callback(request::Ptr{Cvoid}, status::API.ucs_status_t, info::Ptr{
     nothing
 end
 
-
 # Current implementation is blocking
+handle_request(ep::UCXEndpoint, ptr) = handle_request(ep.worker, ptr)
+function handle_request(worker::UCXWorker, ptr)
+    if ptr === C_NULL
+        return API.UCS_OK
+    elseif UCS_PTR_IS_ERR(ptr)
+        return UCS_PTR_STATUS(ptr)
+    else
+        status = API.ucp_request_check_status(ptr)
+        while(status === API.UCS_INPROGRESS)
+            progress(worker)
+            yield()
+            status = API.ucp_request_check_status(ptr)
+        end
+        API.ucp_request_free(ptr)
+        return status
+    end
+end
+
+
 function send(ep::UCXEndpoint, buffer, nbytes, tag)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
@@ -252,21 +274,7 @@ function send(ep::UCXEndpoint, buffer, nbytes, tag)
         data = pointer(buffer)
 
         ptr = API.ucp_tag_send_nb(ep.handle, data, nbytes, dt, tag, cb)
-
-        if ptr === C_NULL
-            return API.UCS_OK
-        elseif UCS_PTR_IS_ERR(ptr)
-            return UCS_PTR_STATUS(ptr)
-        else
-            status = API.ucp_request_check_status(ptr)
-            while(status === API.UCS_INPROGRESS)
-                progress(ep.worker)
-                yield()
-                status = API.ucp_request_check_status(ptr)
-            end
-            API.ucp_request_free(ptr)
-            return status
-        end
+        return handle_request(ep, ptr)
     end
 end
 
@@ -277,20 +285,7 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
     GC.@preserve buffer begin
         data = pointer(buffer)
         ptr = API.ucp_tag_recv_nb(worker.handle, data, nbytes, dt, tag, tag_mask, cb)
-        if ptr === C_NULL
-            return API.UCS_OK
-        elseif UCS_PTR_IS_ERR(ptr)
-            return UCS_PTR_STATUS(ptr)
-        else
-            status = API.ucp_request_check_status(ptr)
-            while(status === API.UCS_INPROGRESS)
-                progress(worker)
-                yield()
-                status = API.ucp_request_check_status(ptr)
-            end
-            API.ucp_request_free(ptr)
-            return status
-        end
+        return handle_request(worker, ptr)
     end
 end
 
@@ -317,21 +312,10 @@ function recv(worker::UCXWorker, msg::UCXMessage, buffer, nbytes)
         data = pointer(buffer)
 
         ptr = API.ucp_tag_msg_recv_nb(worker.handle, data, nbytes, dt, msg.handle, cb)
-        if ptr === C_NULL
-            return API.UCS_OK
-        elseif UCS_PTR_IS_ERR(ptr)
-            return UCS_PTR_STATUS(ptr)
-        else
-            status = API.ucp_request_check_status(ptr)
-            while(status === API.UCS_INPROGRESS)
-                progress(ep.worker)
-                yield()
-                status = API.ucp_request_check_status(ptr)
-            end
-            API.ucp_request_free(ptr)
-            return status
-        end
+        return handle_request(worker, ptr)
     end
 end
+
+
 
 end
