@@ -18,7 +18,7 @@ function echo_server(ep::UCXEndpoint)
     atomic_sub!(expected_clients, 1)
 end
 
-function start_server()
+function start_server(ready=Event())
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
 
@@ -37,7 +37,7 @@ function start_server()
     end
     cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
     listener = UCX.UCXListener(worker, port, cb)
-
+    notify(ready)
     while expected_clients[] > 0
         UCX.progress(worker)
         yield()
@@ -60,11 +60,22 @@ function start_client()
 end
 
 if !isinteractive()
-    @assert length(ARGS) >= 1 "Expected command line argument role: 'client', 'server'"
-    if ARGS[1] == "server"
-        expected_clients[] = length(ARGS) == 2 ? parse(Int, ARGS[2]) : 1
+    @assert length(ARGS) >= 1 "Expected command line argument role: 'client', 'server', 'test'"
+    kind = ARGS[1]
+    expected_clients[] = length(ARGS) == 2 ? parse(Int, ARGS[2]) : 1
+    if kind == "server"
         start_server()
-    else
+    elseif kind == "client"
         start_client()
+    elseif kind =="test"
+        event = Event()
+        @sync begin
+            @async start_server(event)
+            wait(event)
+            for i in 1:expected_clients[]
+                @async start_client()
+            end
+        end
     end
 end
+d
