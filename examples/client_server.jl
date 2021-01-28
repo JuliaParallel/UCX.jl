@@ -4,18 +4,18 @@ using Sockets
 using UCX: UCXEndpoint
 using UCX: recv, send
 
+using Base.Threads
+
 const port = 8890
+const expected_clients = Atomic{Int}(0)
 
 function echo_server(ep::UCXEndpoint)
-    @info "Starting echo_server"
     size = Int[0]
     recv(ep.worker, size, sizeof(Int), 777)
-    @info "recv size" size[1]
     data = Array{UInt8}(undef, size[1])
     recv(ep.worker, data, sizeof(data), 777)
-    @info "recv data"
     send(ep, data, sizeof(data), 777)
-    @info "Echo!"
+    atomic_sub!(expected_clients, 1)
 end
 
 function start_server()
@@ -25,7 +25,6 @@ function start_server()
     function listener_callback(conn_request_h::UCX.API.ucp_conn_request_h, args::Ptr{Cvoid})
         conn_request = UCX.UCXConnectionRequest(conn_request_h)
         Threads.@spawn begin
-            @info "hello from thread"
             # TODO: Errors in echo_server are not shown...
             try
                 echo_server(UCXEndpoint($worker, $conn_request))
@@ -39,10 +38,11 @@ function start_server()
     cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
     listener = UCX.UCXListener(worker, port, cb)
 
-    while true
+    while expected_clients[] > 0
         UCX.progress(worker)
         yield()
     end
+    exit(0)
 end
 
 function start_client()
@@ -51,14 +51,20 @@ function start_client()
     ep = UCX.UCXEndpoint(worker, IPv4("127.0.0.1"), port)
 
     data = "Hello world"
-    @info "sending size" sizeof(data)
     UCX.send(ep, Int[sizeof(data)], sizeof(Int), 777)
-    @info "sending data"
     UCX.send(ep, data, sizeof(data), 777)
-    @info "recv data"
     buffer = Array{UInt8}(undef, sizeof(data))
     UCX.recv(worker, buffer, sizeof(buffer), 777)
     @assert String(buffer) == data
     exit(0)
 end
 
+if !isinteractive()
+    @assert length(ARGS) >= 1 "Expected command line argument role: 'client', 'server'"
+    if ARGS[1] == "server"
+        expected_clients[] = length(ARGS) == 2 ? parse(Int, ARGS[2]) : 1
+        start_server()
+    else
+        start_client()
+    end
+end

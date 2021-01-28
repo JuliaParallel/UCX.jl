@@ -3,9 +3,8 @@ on:
   push:
     branches:
       - master
-      - staging
-      - trying
     tags: '*'
+  pull_request:
 jobs:
   CI-julia-1-6-nightly:
     name: CI-julia-1-6-nightly
