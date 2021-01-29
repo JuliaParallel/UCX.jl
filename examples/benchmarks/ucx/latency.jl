@@ -1,32 +1,11 @@
 using UCX
-using Printf
 using Sockets
 
 const port = 8890
 
-const MAX_MESSAGE_SIZE = 1<<22
-const LARGE_MESSAGE_SIZE = 8192
-
-const LAT_LOOP_SMALL = 10000
-const LAT_SKIP_SMALL = 100
-const LAT_LOOP_LARGE = 1000
-const LAT_SKIP_LARGE = 10
+include(joinpath(@__DIR__, "..", "config.jl"))
 
 # Inspired by OSU Microbenchmark latency test
-
-function prettytime(t)
-    if t < 1e3
-        value, units = t, "ns"
-    elseif t < 1e6
-        value, units = t / 1e3, "μs"
-    elseif t < 1e9
-        value, units = t / 1e6, "ms"
-    else
-        value, units = t / 1e9, "s"
-    end
-    return string(@sprintf("%.3f", value), " ", units)
-end
-
 function touch_data(send_buf, recv_buf, size)
     send_buf[1:size] .= 'A' % UInt8
     recv_buf[1:size] .= 'B' % UInt8
@@ -36,7 +15,7 @@ function benchmark(ep, myid)
     recv_buf = Vector{UInt8}(undef, MAX_MESSAGE_SIZE)
     send_buf = Vector{UInt8}(undef, MAX_MESSAGE_SIZE)
 
-    @info "Let's go!"
+    t = Table(msg_size = Int[], latency = Float64[], kind=Symbol[])
     size = 1
     while size <= MAX_MESSAGE_SIZE
         touch_data(send_buf, recv_buf, size)
@@ -73,11 +52,17 @@ function benchmark(ep, myid)
         if myid == 0
             t_delta = t_end-t_start
             t_op = t_delta / (2*loop)
-            @info "Latency benchmark" time=prettytime(t_op) size
+
+            push!(t, (msg_size = size, latency = t_op, kind=:ucx))
         end
         size *= 2 
     end
-    exit(1)
+
+    if myid == 0
+        CSV.write(joinpath(@__DIR__, "latency.csv"), t)
+    end
+
+    exit()
 end
 
 function start_server()
