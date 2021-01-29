@@ -294,19 +294,13 @@ struct ucp_tag_recv_info
     length::Csize_t
 end
 
-const ucp_send_nbx_callback_t = Ptr{Cvoid}
-
-struct ANONYMOUS1_cb
-    send::ucp_send_nbx_callback_t
-end
-
 const ucp_datatype_t = UInt64
 
 struct ucp_request_param_t
     op_attr_mask::UInt32
     flags::UInt32
     request::Ptr{Cvoid}
-    cb::ANONYMOUS1_cb
+    cb::Ptr{Cvoid}
     datatype::ucp_datatype_t
     user_data::Ptr{Cvoid}
     reply_buffer::Ptr{Cvoid}

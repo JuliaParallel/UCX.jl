@@ -11,10 +11,10 @@ const expected_clients = Atomic{Int}(0)
 
 function echo_server(ep::UCX.Endpoint)
     size = Int[0]
-    recv(ep, size, sizeof(Int))
+    wait(recv(ep, size, sizeof(Int)))
     data = Array{UInt8}(undef, size[1])
-    stream_recv(ep, data, sizeof(data))
-    stream_send(ep, data, sizeof(data))
+    wait(stream_recv(ep, data, sizeof(data)))
+    wait(stream_send(ep, data, sizeof(data)))
     atomic_sub!(expected_clients, 1)
 end
 
@@ -52,10 +52,13 @@ function start_client(port = default_port)
     ep = UCX.Endpoint(worker, IPv4("127.0.0.1"), port)
 
     data = "Hello world"
-    send(ep, Int[sizeof(data)], sizeof(Int))
-    stream_send(ep, data, sizeof(data))
+    req1 = send(ep, Int[sizeof(data)], sizeof(Int))
+    req2 = stream_send(ep, data, sizeof(data))
     buffer = Array{UInt8}(undef, sizeof(data))
-    stream_recv(ep, buffer, sizeof(buffer))
+    req3 = stream_recv(ep, buffer, sizeof(buffer))
+    wait(req1)
+    wait(req2)
+    wait(req3)
     @assert String(buffer) == data
 end
 
