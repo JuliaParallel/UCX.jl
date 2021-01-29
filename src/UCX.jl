@@ -30,6 +30,7 @@ end
 
 @inline function set!(ref::Ref{T}, fieldname, val) where T
     field = find_field(T, fieldname)
+    @assert field !== nothing
     offset = fieldoffset(T, field)
     GC.@preserve ref begin
         base_ptr =  Base.unsafe_convert(Ptr{T}, ref)
@@ -165,8 +166,8 @@ mutable struct UCXContext
 
         params = Ref{API.ucp_params}()
         memzero!(params)
-        set!(params, :field_mask,   field_mask)
-        set!(params, :features,     features)
+        set!(params, :field_mask,      field_mask)
+        set!(params, :features,        features)
 
         config = UCXConfig(; kwargs...)
 
@@ -209,6 +210,7 @@ end
 mutable struct UCXWorker
     handle::API.ucp_worker_h
     context::UCXContext
+    inflight::IdDict{Any, Nothing} # IdSet -- Can't use UCXRequest since that is defined after
 
     function UCXWorker(context::UCXContext)
         field_mask  = API.UCP_WORKER_PARAM_FIELD_THREAD_MODE
@@ -222,8 +224,9 @@ mutable struct UCXWorker
         r_handle = Ref{API.ucp_worker_h}()
         @check API.ucp_worker_create(context, params, r_handle)
 
-        worker = new(r_handle[], context)
+        worker = new(r_handle[], context, IdDict{Any,Nothing}())
         finalizer(worker) do worker
+            @assert isempty(worker.inflight)
             API.ucp_worker_destroy(worker)
         end
         return worker
@@ -242,10 +245,9 @@ end
 mutable struct UCXEndpoint
     handle::API.ucp_ep_h
     worker::UCXWorker
-    open::Bool
 
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
-        endpoint = new(handle, worker, true)
+        endpoint = new(handle, worker)
         finalizer(endpoint) do endpoint
             # NOTE: Generally not safe to spin in finalizer
             #   - ucp_ep_destroy
@@ -271,10 +273,6 @@ mutable struct UCXEndpoint
     end
 end
 Base.unsafe_convert(::Type{API.ucp_ep_h}, ep::UCXEndpoint) = ep.handle
-
-function Base.isopen(ep::UCXEndpoint)
-    ep.open
-end
 
 function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
     field_mask = API.UCP_EP_PARAM_FIELD_FLAGS |
@@ -375,141 +373,200 @@ function ucp_dt_make_contig(elem_size)
 end
 
 ##
+# Request handling
+##
+
+# User representation of a request
+# don't create these manually
+mutable struct UCXRequest
+    worker::UCXWorker
+    event::Base.Event # XXX: Do we need a full `Event` here or can we get away with an atomic bool
+    status::API.ucs_status_t
+    data::Any
+    function UCXRequest(worker::UCXWorker, data)
+        req = new(worker, Base.Event(), API.UCS_OK, data)
+        worker.inflight[req] = nothing
+        return req
+    end
+end
+UCXRequest(ep::UCXEndpoint, data) = UCXRequest(ep.worker, data)
+
+function unroot(request::UCXRequest)
+    inflight = request.worker.inflight
+    delete!(inflight, request)
+end
+
+function UCXRequest(_request::Ptr{Cvoid})
+    request = Base.unsafe_pointer_to_objref(_request) # rooted through inflight
+    unroot(request) # caller is now responsible
+
+    return request
+end
+
+@inline function handle_request(request::UCXRequest, ptr)
+    if !UCS_PTR_IS_PTR(ptr)
+        # Request is already done
+        unroot(request)
+        status = UCS_PTR_STATUS(ptr)
+        request.status = status
+        notify(request)
+    end
+    return request
+end
+
+Base.notify(req::UCXRequest) = notify(req.event)
+function Base.wait(req::UCXRequest)
+    # wait(req.event)
+    # Note: Spin-loop only valid on 1.5 since we have a call to yield
+    #       and LLVM can't optimize the load away. Would be great if
+    #       Julia had a `wait(::Event, progress)` mechanism.
+    while !req.event.set
+        yield()
+        progress(req.worker)
+    end
+    @check req.status
+end
+
+##
 # UCX tagged send and receive
 ##
 
-function send_callback(request::Ptr{Cvoid}, status::API.ucs_status_t)
-    @check status
+function send_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, user_data::Ptr{Cvoid})
+    @assert user_data !== C_NULL
+    request = UCXRequest(user_data)
+    request.status = status
+    notify(request)
+    API.ucp_request_free(req)
     nothing
 end
 
-function recv_callback(request::Ptr{Cvoid}, status::API.ucs_status_t, info::Ptr{API.ucp_tag_recv_info_t})
-    @check status
+function recv_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, info::Ptr{API.ucp_tag_recv_info_t}, user_data::Ptr{Cvoid})
+    @assert user_data !== C_NULL
+    request = UCXRequest(user_data)
+    request.status = status
+    notify(request)
+    API.ucp_request_free(req)
     nothing
 end
 
-# Current implementation is blocking
-handle_request(ep::UCXEndpoint, ptr) = handle_request(ep.worker, ptr)
-function handle_request(worker::UCXWorker, ptr)
-    if UCS_PTR_IS_PTR(ptr)
-        status = API.ucp_request_check_status(ptr)
-        while status === API.UCS_INPROGRESS
-            progress(worker)
-            yield()
-            status = API.ucp_request_check_status(ptr)
-        end
-        API.ucp_request_free(ptr)
-    else
-        status = UCS_PTR_STATUS(ptr)
+@inline function request_param(dt, request, cb, flags=nothing)
+    attr_mask = API.UCP_OP_ATTR_FIELD_CALLBACK |
+                API.UCP_OP_ATTR_FIELD_USER_DATA |
+                API.UCP_OP_ATTR_FIELD_DATATYPE
+
+    if flags !== nothing
+        attr_mask |= API.UCP_OP_ATTR_FIELD_FLAGS
     end
-    @check status
-end
 
+    param = Ref{API.ucp_request_param_t}()
+    memzero!(param)
+    set!(param, :op_attr_mask, attr_mask)
+    set!(param, :cb,           cb)
+    set!(param, :datatype,     dt)
+    set!(param, :user_data,    Base.pointer_from_objref(request))
+    if flags !== nothing
+        set!(param, :flags,    flags)
+    end
+
+    param
+end
 
 function send(ep::UCXEndpoint, buffer, nbytes, tag)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
-    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
+    request = UCXRequest(ep, buffer) # rooted through worker
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+
+    param = request_param(dt, request, cb)
 
     GC.@preserve buffer begin
         data = pointer(buffer)
-
-        ptr = API.ucp_tag_send_nb(ep, data, nbytes, dt, tag, cb)
-        return handle_request(ep, ptr)
+        ptr = API.ucp_tag_send_nbx(ep, data, nbytes, tag, param)
+        return handle_request(request, ptr)
     end
 end
 
 function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp_tag_t))
-    dt = ucp_dt_make_contig(1)
-    cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}))
+    dt = ucp_dt_make_contig(1) # since we are receiving nbytes
+    request = UCXRequest(worker, buffer) # rooted through worker
+    cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}, Ptr{Cvoid}))
 
-    GC.@preserve buffer cb begin
+    param = request_param(dt, request, cb)
+
+    GC.@preserve buffer begin
         data = pointer(buffer)
-        ptr = API.ucp_tag_recv_nb(worker, data, nbytes, dt, tag, tag_mask, cb)
-        return handle_request(worker, ptr)
+        ptr = API.ucp_tag_recv_nbx(worker, data, nbytes, tag, tag_mask, param)
+        return handle_request(request, ptr)
     end
 end
 
-struct UCXMessage
-    handle::API.ucp_tag_message_h
-    info::API.ucp_tag_recv_info_t
-end
+# UCX probe & probe msg receive
 
-function probe(worker::UCXWorker, tag, tag_mask=~zero(UCX.API.ucp_tag_t), remove=true)
-    info = Ref{API.ucp_tag_recv_info_t}()
-    message_h = API.ucp_tag_probe_nb(worker, tag, tag_mask, remove, info)
-    if message_h === C_NULL
-        return nothing
-    else
-        return UCXMessage(message_h, info[])
-    end
-end
-
-function recv(worker::UCXWorker, msg::UCXMessage, buffer, nbytes)
-    dt = ucp_dt_make_contig(sizeof(eltype(buffer)))
-    cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}))
-
-    GC.@preserve data begin
-        data = pointer(buffer)
-
-        ptr = API.ucp_tag_msg_recv_nb(worker, data, nbytes, dt, msg.handle, cb)
-        return handle_request(worker, ptr)
-    end
-end
-
+##
 # UCX stream interface
+##
 
-function stream_recv_callback(request::Ptr{Cvoid}, status::API.ucs_status_t, length::Csize_t)
-    @check status
+function stream_recv_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, length::Csize_t, user_data::Ptr{Cvoid})
+    @assert user_data !== C_NULL
+    request = UCXRequest(user_data)
+    request.status = status
+    notify(request)
+    API.ucp_request_free(req)
     nothing
 end
 
 function stream_send(ep::UCXEndpoint, buffer, nbytes)
+    request = UCXRequest(ep, buffer) # rooted through ep.worker
     GC.@preserve buffer begin
         data = pointer(buffer)
-        stream_send(ep, data, nbytes)
+        stream_send(ep, request, data, nbytes)
     end
 end
 
 function stream_send(ep::UCXEndpoint, ref::Ref{T}) where T
+    request = UCXRequest(ep, ref) # rooted through ep.worker
     GC.@preserve ref begin
         data = Base.unsafe_convert(Ptr{Cvoid}, ref)
-        stream_send(ep, data, sizeof(T))
+        stream_send(ep, request, data, sizeof(T))
     end
 end
 
-function stream_send(ep::UCXEndpoint, data::Ptr, nbytes)
+function stream_send(ep::UCXEndpoint, request::UCXRequest, data::Ptr, nbytes)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
-    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
 
-    ptr = API.ucp_stream_send_nb(ep, data, nbytes, dt, cb, #=flags=# 0)
-    return handle_request(ep, ptr)
+    param = request_param(dt, request, cb)
+    ptr = API.ucp_stream_send_nbx(ep, data, nbytes, param)
+    return handle_request(request, ptr)
 end
 
 function stream_recv(ep::UCXEndpoint, buffer, nbytes)
+    request = UCXRequest(ep, buffer) # rooted through ep.worker
     GC.@preserve buffer begin
         data = pointer(buffer)
-        stream_recv(ep, data, nbytes)
+        stream_recv(ep, request, data, nbytes)
     end
 end
 
 function stream_recv(ep::UCXEndpoint, ref::Ref{T}) where T
+    request = UCXRequest(ep, ref) # rooted through ep.worker
     GC.@preserve ref begin
         data = Base.unsafe_convert(Ptr{Cvoid}, ref)
-        stream_recv(ep, data, sizeof(T))
+        stream_recv(ep, request, data, sizeof(T))
     end
 end
 
-function stream_recv(ep::UCXEndpoint, data::Ptr, nbytes)
+function stream_recv(ep::UCXEndpoint, request::UCXRequest, data::Ptr, nbytes)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
-    cb = @cfunction(stream_recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Csize_t))
+    cb = @cfunction(stream_recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Csize_t, Ptr{Cvoid}))
+    flags = API.UCP_STREAM_RECV_FLAG_WAITALL
 
     length = Ref{Csize_t}(0)
-    ptr = API.ucp_stream_recv_nb(ep, data, nbytes, dt, cb, length, API.UCP_STREAM_RECV_FLAG_WAITALL)
-    return handle_request(ep, ptr)
+    param = request_param(dt, request, cb, flags)
+    ptr = API.ucp_stream_recv_nbx(ep, data, nbytes, length, param)
+    return handle_request(request, ptr)
 end
 
-### TODO: stream_recv_data_nb
-### TODO: stream_recv_nbx
+### TODO: stream_recv_data_nbx
 
 ## RMA
 
@@ -550,12 +607,15 @@ function Endpoint(ep::UCXEndpoint, listener)
     send_tag = Ref(msg_tag)
     recv_tag = Ref(msg_tag)
     if listener
-        stream_send(ep, send_tag)
-        stream_recv(ep, recv_tag)
+        req1 = stream_send(ep, send_tag)
+        req2 = stream_recv(ep, recv_tag)
     else
-        stream_recv(ep, recv_tag)
-        stream_send(ep, send_tag)
+        req1 = stream_recv(ep, recv_tag)
+        req2 = stream_send(ep, send_tag)
     end
+    wait(req1)
+    wait(req2)
+
     @assert msg_tag !== recv_tag[]
 
     Endpoint(ep, msg_tag, recv_tag[])
