@@ -78,4 +78,3 @@ if !isinteractive()
         end
     end
 end
-d
