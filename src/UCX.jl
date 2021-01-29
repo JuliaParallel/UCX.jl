@@ -60,7 +60,7 @@ mutable struct UCXContext
 
         # We always request UCP_FEATURE_WAKEUP even when in blocking mode
         # See <https://github.com/rapidsai/ucx-py/pull/377>
-        # There is also AM (atomic) and RMA features
+        # There is also AMO32 & AMO64 (atomic), RMA, and AM
         features     = API.UCP_FEATURE_TAG |
                        API.UCP_FEATURE_WAKEUP |
                        API.UCP_FEATURE_STREAM
@@ -163,6 +163,8 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
         set!(params, :field_mask,   field_mask)
         set!(params, :sockaddr,     ucs_sockaddr)
         set!(params, :flags,        flags)
+
+        # TODO: Error callback
     
         status = API.ucp_ep_create(worker.handle, params, r_handle)
         @assert status == API.UCS_OK
@@ -181,6 +183,8 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     set!(params, :field_mask,   field_mask)
     set!(params, :conn_request, conn_request.handle)
     set!(params, :flags,        flags)
+
+    # TODO: Error callback
 
     r_handle = Ref{API.ucp_ep_h}()
     status = API.ucp_ep_create(worker.handle, params, r_handle)
@@ -342,5 +346,13 @@ function stream_recv(ep::UCXEndpoint, buffer, nbytes)
         return handle_request(ep, ptr)
     end
 end
+
+# RMA
+
+# Atomics
+
+# AM
+
+# Collectives
 
 end #module
