@@ -90,7 +90,7 @@ function start_server()
             try 
                 benchmark(UCX.UCXEndpoint($worker, $conn_request), 0)
             catch err
-                showerror(err, catch_backtrace())
+                showerror(stderr, err, catch_backtrace())
                 exit(-1)
             end
         end

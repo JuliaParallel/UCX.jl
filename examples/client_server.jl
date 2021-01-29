@@ -29,7 +29,7 @@ function start_server(ready=Event())
             try
                 echo_server(UCXEndpoint($worker, $conn_request))
             catch err
-                showerror(err, catch_backtrace())
+                showerror(stderr, err, catch_backtrace())
                 exit(-1)
             end
         end
