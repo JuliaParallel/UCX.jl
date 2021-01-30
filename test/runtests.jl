@@ -1,6 +1,17 @@
 using Test
 using UCX
 
+@testset "config" begin
+    config = UCX.UCXConfig(TLS="tcp")
+    @test parse(Dict, config)[:TLS] == "tcp"
+
+    config[:TLS] = "all"
+    @test parse(Dict, config)[:TLS] == "all"
+
+    ctx = UCX.UCXContext(TLS="tcp")
+    @test ctx.config[:TLS] == "tcp"
+end
+
 
 @testset "examples" begin
     examples_dir = joinpath(@__DIR__, "..", "examples")

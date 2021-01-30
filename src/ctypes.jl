@@ -10,7 +10,7 @@ const SIZE_MAX = typemax(Csize_t)
 const socklen_t = Cuint
 const intptr_t = Int
 const ssize_t = Cssize_t
-const FILE = Cint
+const FILE = Base.Libc.FILE
 
 @static if ccall(:jl_sizeof_off_t, Cint,()) == 4
     const off_t = Int32
