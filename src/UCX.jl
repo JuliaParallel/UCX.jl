@@ -52,10 +52,64 @@ function __init__()
     @assert lib_ver === api_ver
 end
 
+mutable struct UCXConfig
+    handle::Ptr{API.ucp_config_t}
+
+    function UCXConfig(;kwargs...)
+        r_handle = Ref{Ptr{API.ucp_config_t}}()
+        status = API.ucp_config_read(C_NULL, C_NULL, r_handle) # XXX: Prefix is broken
+        @assert status == API.UCS_OK
+
+        config = new(r_handle[])
+        finalizer(config) do config
+            API.ucp_config_release(config.handle)
+        end
+
+        for (key, value) in kwargs
+            config[key] = string(value)
+        end
+
+        config
+    end
+end
+
+function Base.setindex!(config::UCXConfig, value::String, key::Union{String, Symbol})
+    status = API.ucp_config_modify(config.handle, key, value)
+    @assert status == API.UCS_OK
+    return value
+end
+
+function Base.parse(::Type{Dict}, config::UCXConfig)
+    ptr  = Ref{Ptr{Cchar}}()
+    size = Ref{Csize_t}()
+    fd   = ccall(:open_memstream, Ptr{API.FILE}, (Ptr{Ptr{Cchar}}, Ptr{Csize_t}), ptr, size)
+
+    # Flush the just created fd to have `ptr` be valid
+    systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
+
+    try
+        API.ucp_config_print(config.handle, fd, C_NULL, API.UCS_CONFIG_PRINT_CONFIG)
+        systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
+    catch
+        Base.Libc.free(ptr[])
+        rethrow()
+    end
+    io = IOBuffer(unsafe_wrap(Array, Base.unsafe_convert(Ptr{UInt8}, ptr[]), (size[],), own=true))
+
+    dict = Dict{Symbol, String}()
+    for line in readlines(io)
+        key, value = split(line, '=')
+        key = key[5:end] # Remove `UCX_`
+        dict[Symbol(key)] = value
+    end
+    return dict
+end
+
 mutable struct UCXContext
     handle::API.ucp_context_h
+    config::Dict{Symbol, String}
 
-    function UCXContext()
+    function UCXContext(; kwargs...)
         field_mask   = API.UCP_PARAM_FIELD_FEATURES
 
         # We always request UCP_FEATURE_WAKEUP even when in blocking mode
@@ -70,22 +124,43 @@ mutable struct UCXContext
         set!(params, :field_mask,   field_mask)
         set!(params, :features,     features)
 
-        config = C_NULL
-        # TODO config
+        config = UCXConfig(; kwargs...)
 
         r_handle = Ref{API.ucp_context_h}()
         # UCP.ucp_init is a header function so we call, UCP.ucp_init_version
         status = API.ucp_init_version(API.UCP_API_MAJOR, API.UCP_API_MINOR,
-                                      params, config, r_handle)
+                                      params, config.handle, r_handle)
         @assert status === API.UCS_OK
 
-        context = new(r_handle[])
+        context = new(r_handle[], parse(Dict, config))
 
         finalizer(context) do context
             API.ucp_cleanup(context.handle)
         end
     end
 end
+
+function info(ucx::UCXContext)
+    ptr  = Ref{Ptr{Cchar}}()
+    size = Ref{Csize_t}()
+    fd   = ccall(:open_memstream, Ptr{API.FILE}, (Ptr{Ptr{Cchar}}, Ptr{Csize_t}), ptr, size)
+
+    # Flush the just created fd to have `ptr` be valid
+    systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
+
+    try
+        API.ucp_context_print_info(ucx.handle, fd)
+        systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
+    catch
+        Base.Libc.free(ptr[])
+        rethrow()
+    end
+    str = unsafe_string(ptr[], size[])
+    Base.Libc.free(ptr[])
+    str
+end
+
+# ucp_context_query
 
 mutable struct UCXWorker
     handle::API.ucp_worker_h
