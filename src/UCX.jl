@@ -140,6 +140,28 @@ mutable struct UCXContext
     end
 end
 
+function info(ucx::UCXContext)
+    ptr  = Ref{Ptr{Cchar}}()
+    size = Ref{Csize_t}()
+    fd   = ccall(:open_memstream, Ptr{API.FILE}, (Ptr{Ptr{Cchar}}, Ptr{Csize_t}), ptr, size)
+
+    # Flush the just created fd to have `ptr` be valid
+    systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
+
+    try
+        API.ucp_context_print_info(ucx.handle, fd)
+        systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
+    catch
+        Base.Libc.free(ptr[])
+        rethrow()
+    end
+    str = unsafe_string(ptr[], size[])
+    Base.Libc.free(ptr[])
+    str
+end
+
+# ucp_context_query
+
 mutable struct UCXWorker
     handle::API.ucp_worker_h
     context::UCXContext
