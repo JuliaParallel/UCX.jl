@@ -25,7 +25,6 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
     function listener_callback(conn_request_h::UCX.API.ucp_conn_request_h, args::Ptr{Cvoid})
         conn_request = UCX.UCXConnectionRequest(conn_request_h)
         Threads.@spawn begin
-            # TODO: Errors in echo_server are not shown...
             try
                 echo_server(UCXEndpoint($worker, $conn_request))
             catch err
