@@ -30,9 +30,17 @@ UCS_PTR_STATUS(ptr::Ptr{Cvoid}) = API.ucs_status_t(reinterpret(UInt, ptr))
 UCS_PTR_IS_ERR(ptr::Ptr{Cvoid}) = uintptr_t(ptr) >= uintptr_t(API.UCS_ERR_LAST)
 UCS_PTR_IS_PTR(ptr::Ptr{Cvoid}) = (uintptr_t(ptr) - 1) < (uintptr_t(API.UCS_ERR_LAST) - 1)
 
-struct UCXError
-    ctx::String
+struct UCXException <: Exception
     status::API.ucs_status_t
+end
+
+macro check(ex)
+    quote
+        status = $(esc(ex))
+        if status != API.UCS_OK
+            throw(UCXException(status))
+        end
+    end
 end
 
 function version()
@@ -57,8 +65,7 @@ mutable struct UCXConfig
 
     function UCXConfig(;kwargs...)
         r_handle = Ref{Ptr{API.ucp_config_t}}()
-        status = API.ucp_config_read(C_NULL, C_NULL, r_handle) # XXX: Prefix is broken
-        @assert status == API.UCS_OK
+        @check API.ucp_config_read(C_NULL, C_NULL, r_handle) # XXX: Prefix is broken
 
         config = new(r_handle[])
         finalizer(config) do config
@@ -74,8 +81,7 @@ mutable struct UCXConfig
 end
 
 function Base.setindex!(config::UCXConfig, value::String, key::Union{String, Symbol})
-    status = API.ucp_config_modify(config.handle, key, value)
-    @assert status == API.UCS_OK
+    @check API.ucp_config_modify(config.handle, key, value)
     return value
 end
 
@@ -128,9 +134,8 @@ mutable struct UCXContext
 
         r_handle = Ref{API.ucp_context_h}()
         # UCP.ucp_init is a header function so we call, UCP.ucp_init_version
-        status = API.ucp_init_version(API.UCP_API_MAJOR, API.UCP_API_MINOR,
-                                      params, config.handle, r_handle)
-        @assert status === API.UCS_OK
+        @check API.ucp_init_version(API.UCP_API_MAJOR, API.UCP_API_MINOR,
+                                    params, config.handle, r_handle)
 
         context = new(r_handle[], parse(Dict, config))
 
@@ -176,8 +181,7 @@ mutable struct UCXWorker
         set!(params, :thread_mode, thread_mode)
 
         r_handle = Ref{API.ucp_worker_h}()
-        status = API.ucp_worker_create(context.handle, params, r_handle)
-        @assert status === API.UCS_OK
+        @check API.ucp_worker_create(context.handle, params, r_handle)
 
         worker = new(r_handle[], context)
         finalizer(worker) do worker
@@ -189,15 +193,6 @@ end
 
 function progress(worker::UCXWorker)
     API.ucp_worker_progress(worker.handle) !== 0
-end
-
-function arm(worker::UCXWorker)
-    status = API.ucp_worker_arm(worker.handle)
-    if status == API.UCS_ERR_BUSY
-        return false
-    end
-    @assert status == API.UCS_OK
-    return true
 end
 
 struct UCXConnectionRequest
@@ -241,8 +236,7 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
 
         # TODO: Error callback
     
-        status = API.ucp_ep_create(worker.handle, params, r_handle)
-        @assert status == API.UCS_OK
+        @check API.ucp_ep_create(worker.handle, params, r_handle)
     end
 
     UCXEndpoint(worker, r_handle[])
@@ -262,8 +256,7 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     # TODO: Error callback
 
     r_handle = Ref{API.ucp_ep_h}()
-    status = API.ucp_ep_create(worker.handle, params, r_handle)
-    @assert status == API.UCS_OK
+    @check API.ucp_ep_create(worker.handle, params, r_handle)
 
     UCXEndpoint(worker, r_handle[])
 end
@@ -303,8 +296,7 @@ mutable struct UCXListener
             set!(params, :sockaddr, ucs_sockaddr)
             set!(params, :conn_handler, conn_handler)
 
-            status = API.ucp_listener_create(worker.handle, params, r_handle)
-            @assert status === API.UCS_OK
+            @check API.ucp_listener_create(worker.handle, params, r_handle)
         end  
 
         new(r_handle[], worker, port)
@@ -312,8 +304,7 @@ mutable struct UCXListener
 end
 
 function reject(listener::UCXListener, conn_request::UCXConnectionRequest)
-    status = API.ucp_listener_reject(listener.handle, conn_request.handle)
-    @assert status === API.UCS_OK
+    @check API.ucp_listener_reject(listener.handle, conn_request.handle)
 end
 
 function ucp_dt_make_contig(elem_size)
@@ -335,11 +326,7 @@ end
 # Current implementation is blocking
 handle_request(ep::UCXEndpoint, ptr) = handle_request(ep.worker, ptr)
 function handle_request(worker::UCXWorker, ptr)
-    if ptr === C_NULL
-        return API.UCS_OK
-    elseif UCS_PTR_IS_ERR(ptr)
-        return UCS_PTR_STATUS(ptr)
-    else
+    if UCS_PTR_IS_PTR(ptr)
         status = API.ucp_request_check_status(ptr)
         while(status === API.UCS_INPROGRESS)
             progress(worker)
@@ -347,8 +334,10 @@ function handle_request(worker::UCXWorker, ptr)
             status = API.ucp_request_check_status(ptr)
         end
         API.ucp_request_free(ptr)
-        return status
+    else
+        status = UCS_PTR_STATUS(ptr)
     end
+    @check status
 end
 
 
