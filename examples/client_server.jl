@@ -68,10 +68,10 @@ if !isinteractive()
     elseif kind =="test"
         ch_port = Channel{Int}(1)
         @sync begin
-            @async start_server(ch_port, nothing)
+            UCX.@async_showerr start_server(ch_port, nothing)
             port = take!(ch_port)
             for i in 1:expected_clients[]
-                @async start_client(port)
+                UCX.@async_showerr start_client(port)
             end
         end
     end

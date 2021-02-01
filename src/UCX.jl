@@ -23,6 +23,8 @@ end
     val
 end
 
+# Exceptions/Status
+
 uintptr_t(ptr::Ptr) = reinterpret(UInt, ptr)
 uintptr_t(status::API.ucs_status_t) = reinterpret(UInt, convert(Int, status))
 
@@ -42,6 +44,22 @@ macro check(ex)
         end
     end
 end
+
+# Utils
+
+macro async_showerr(ex)
+    esc(quote
+        @async try
+            $ex
+        catch err
+            bt = catch_backtrace()
+            showerror(stderr, err, bt)
+            rethrow()
+        end
+    end)
+end
+
+# Config
 
 function version()
     major = Ref{Cuint}()
