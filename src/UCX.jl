@@ -1,6 +1,6 @@
 module UCX
 
-using Sockets: InetAddr, IPv4
+using Sockets: InetAddr, IPv4, listenany
 
 include("api.jl")
 
@@ -277,9 +277,16 @@ mutable struct UCXListener
     worker::UCXWorker
     port::Cint
 
-    function UCXListener(worker::UCXWorker, port, 
+    function UCXListener(worker::UCXWorker, port=nothing,
                          callback::Union{Ptr{Cvoid}, Base.CFunction} = @cfunction(listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})),
                          args::Ptr{Cvoid} = C_NULL)
+        # Choose free port
+        if port === nothing || port == 0
+            port_hint = 9000 + (getpid() % 1000)
+            port, sock = listenany(UInt16(port_hint))
+            close(sock) # FIXME: https://github.com/rapidsai/ucx-py/blob/72552d1dd1d193d1c8ce749171cdd34d64523d53/ucp/core.py#L288-L304
+        end
+
         field_mask   = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
                        API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
         sockaddr     = Ref(API.IP.sockaddr_in(InetAddr(IPv4(API.IP.INADDR_ANY), port)))

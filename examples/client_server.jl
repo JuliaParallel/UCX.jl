@@ -6,7 +6,7 @@ using UCX: recv, send
 
 using Base.Threads
 
-const port = 8890
+const default_port = 8890
 const expected_clients = Atomic{Int}(0)
 
 function echo_server(ep::UCXEndpoint)
@@ -18,7 +18,7 @@ function echo_server(ep::UCXEndpoint)
     atomic_sub!(expected_clients, 1)
 end
 
-function start_server(ready=Event())
+function start_server(ch_port = Channel{Int}(1), port = default_port)
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
 
@@ -38,15 +38,14 @@ function start_server(ready=Event())
     cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
     listener = UCX.UCXListener(worker, port, cb)
 
-    notify(ready)
+    push!(ch_port, listener.port)
     while expected_clients[] > 0
         UCX.progress(worker)
         yield()
     end
-    exit(0)
 end
 
-function start_client()
+function start_client(port=default_port)
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
     ep = UCX.UCXEndpoint(worker, IPv4("127.0.0.1"), port)
@@ -57,7 +56,6 @@ function start_client()
     buffer = Array{UInt8}(undef, sizeof(data))
     recv(worker, buffer, sizeof(buffer), 777)
     @assert String(buffer) == data
-    exit(0)
 end
 
 if !isinteractive()
@@ -69,12 +67,12 @@ if !isinteractive()
     elseif kind == "client"
         start_client()
     elseif kind =="test"
-        event = Event()
+        ch_port = Channel{Int}(1)
         @sync begin
-            @async start_server(event)
-            wait(event)
+            @async start_server(ch_port, nothing)
+            port = take!(ch_port)
             for i in 1:expected_clients[]
-                @async start_client()
+                @async start_client(port)
             end
         end
     end
