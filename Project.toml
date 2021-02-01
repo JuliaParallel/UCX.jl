@@ -11,5 +11,5 @@ UCX_jll = "16e4e860-d6b8-5056-a518-93e88b6392ae"
 
 [compat]
 CEnum = "0.4"
-UCX_jll = "1.7"
+UCX_jll = "~1.7"
 julia = "1.5"
