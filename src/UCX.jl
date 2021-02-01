@@ -198,7 +198,15 @@ mutable struct UCXEndpoint
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
         endpoint = new(handle, worker, true)
         finalizer(endpoint) do endpoint
-            API.ucp_ep_destroy(endpoint.handle)
+            status = API.ucp_ep_close_nb(endpoint.handle, API.UCP_EP_CLOSE_MODE_FLUSH)
+            if UCS_PTR_IS_PTR(status)
+                while API.ucp_request_check_status(status) == API.UCS_INPROGRESS
+                    progress(worker)
+                end
+                API.ucp_request_free(status)
+            else
+                @check UCS_PTR_STATUS(status)
+            end
         end
         endpoint
     end
@@ -290,7 +298,10 @@ mutable struct UCXListener
             @check API.ucp_listener_create(worker.handle, params, r_handle)
         end  
 
-        new(r_handle[], worker, port)
+        listener = new(r_handle[], worker, port)
+        finalizer(listener) do listener
+            API.ucp_listener_destroy(listener.handle)
+        end
     end
 end
 
@@ -319,7 +330,7 @@ handle_request(ep::UCXEndpoint, ptr) = handle_request(ep.worker, ptr)
 function handle_request(worker::UCXWorker, ptr)
     if UCS_PTR_IS_PTR(ptr)
         status = API.ucp_request_check_status(ptr)
-        while(status === API.UCS_INPROGRESS)
+        while status === API.UCS_INPROGRESS
             progress(worker)
             yield()
             status = API.ucp_request_check_status(ptr)
