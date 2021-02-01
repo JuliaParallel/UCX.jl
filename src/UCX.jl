@@ -216,14 +216,24 @@ mutable struct UCXEndpoint
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
         endpoint = new(handle, worker, true)
         finalizer(endpoint) do endpoint
-            status = API.ucp_ep_close_nb(endpoint.handle, API.UCP_EP_CLOSE_MODE_FLUSH)
-            if UCS_PTR_IS_PTR(status)
-                while API.ucp_request_check_status(status) == API.UCS_INPROGRESS
-                    progress(worker)
+            # NOTE: Generally not safe to spin in finalizer
+            #   - ucp_ep_destroy
+            #   - ucp_ep_close_nb (Gracefully shutdown)
+            #     - UCP_EP_CLOSE_MODE_FORCE
+            #     - UCP_EP_CLOSE_MODE_FLUSH
+            let handle = endpoint.handle
+                @async_showerr begin
+                    status = API.ucp_ep_close_nb(handle, API.UCP_EP_CLOSE_MODE_FLUSH)
+                    if UCS_PTR_IS_PTR(status)
+                        while API.ucp_request_check_status(status) == API.UCS_INPROGRESS
+                            progress(worker)
+                            yield()
+                        end
+                        API.ucp_request_free(status)
+                    else
+                        @check UCS_PTR_STATUS(status)
+                    end
                 end
-                API.ucp_request_free(status)
-            else
-                @check UCS_PTR_STATUS(status)
             end
         end
         endpoint
