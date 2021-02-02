@@ -29,7 +29,7 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
                 echo_server(UCXEndpoint($worker, $conn_request))
             catch err
                 showerror(stderr, err, catch_backtrace())
-                exit(-1)
+                exit(-1) # Fatal error
             end
         end
         nothing
@@ -70,10 +70,10 @@ if !isinteractive()
     elseif kind =="test"
         ch_port = Channel{Int}(1)
         @sync begin
-            UCX.@async_showerr start_server(ch_port, nothing)
+            UCX.@spawn_showerr start_server(ch_port, nothing)
             port = take!(ch_port)
             for i in 1:expected_clients[]
-                UCX.@async_showerr start_client(port)
+                UCX.@spawn_showerr start_client(port)
             end
         end
     end

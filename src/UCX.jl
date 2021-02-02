@@ -4,6 +4,19 @@ using Sockets: InetAddr, IPv4, listenany
 
 include("api.jl")
 
+function __init__()
+    # Julia multithreading uses SIGSEGV to sync thread
+    # https://docs.julialang.org/en/v1/devdocs/debuggingtips/#Dealing-with-signals-1
+    # By default, UCX will error if this occurs (see https://github.com/JuliaParallel/MPI.jl/issues/337)
+    # This is a global flag and can't be set per context, since Julia generally
+    # handles signals I don't see any additional value in having UCX mess with
+    # signal handlers. Setting the environment here does not work, since it is
+    # global, not context specific, and is being parsed on library load.
+
+    # reinstall signal handlers
+    ccall((:ucs_debug_disable_signals, API.libucs), Cvoid, ())
+end
+
 function memzero!(ref::Ref)
     ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), ref, 0, sizeof(ref))
 end
@@ -59,6 +72,18 @@ macro async_showerr(ex)
     end)
 end
 
+macro spawn_showerr(ex)
+    esc(quote
+        Base.Threads.@spawn try
+            $ex
+        catch err
+            bt = catch_backtrace()
+            showerror(stderr, err, bt)
+            rethrow()
+        end
+    end)
+end
+
 # Config
 
 function version()
@@ -72,7 +97,7 @@ end
 mutable struct UCXConfig
     handle::Ptr{API.ucp_config_t}
 
-    function UCXConfig(; ERROR_SIGNALS = "SIGILL,SIGBUS,SIGFPE", kwargs...)
+    function UCXConfig(; kwargs...)
         r_handle = Ref{Ptr{API.ucp_config_t}}()
         @check API.ucp_config_read(C_NULL, C_NULL, r_handle) # XXX: Prefix is broken
 

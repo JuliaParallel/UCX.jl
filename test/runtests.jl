@@ -22,17 +22,15 @@ end
 
     @testset "Client-Server" begin
         script = joinpath(examples_dir, "client_server.jl")
-        launch(n) = run(pipeline(`$cmd $script test $n`, stderr=stderr, stdout=stdout), wait=false)
-        @test success(launch(1))
-        # @test success(launch(2))
-        # @test success(launch(3))
+        for i in 0:0
+            @test success(pipeline(`$cmd $script test $(2^i)`, stderr=stderr, stdout=stdout))
+        end
     end
 
     @testset "Client-Server Stream" begin
         script = joinpath(examples_dir, "client_server_stream.jl")
-        launch(n) = run(pipeline(`$cmd $script test $n`, stderr=stderr, stdout=stdout), wait=false)
-        @test success(launch(1))
-        @test success(launch(2))
-        @test success(launch(3))
+        for i in 0:2
+            @test success(pipeline(`$cmd $script test $(2^i)`, stderr=stderr, stdout=stdout))
+        end
     end
 end
