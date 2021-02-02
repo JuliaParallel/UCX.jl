@@ -9,9 +9,9 @@ using Base.Threads
 const default_port = 8890
 const expected_clients = Atomic{Int}(0)
 
-function echo_server(ep::UCXEndpoint)
+function echo_server(ep::UCX.Endpoint)
     size = Int[0]
-    recv(ep.worker, size, sizeof(Int), 777)
+    recv(ep, size, sizeof(Int))
     data = Array{UInt8}(undef, size[1])
     stream_recv(ep, data, sizeof(data))
     stream_send(ep, data, sizeof(data))
@@ -26,7 +26,7 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
         conn_request = UCX.UCXConnectionRequest(conn_request_h)
         Threads.@spawn begin
             try
-                echo_server(UCXEndpoint($worker, $conn_request))
+                echo_server(UCX.Endpoint($worker, $conn_request))
             catch err
                 showerror(stderr, err, catch_backtrace())
                 exit(-1) # Fatal error
@@ -49,10 +49,10 @@ end
 function start_client(port = default_port)
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
-    ep = UCX.UCXEndpoint(worker, IPv4("127.0.0.1"), port)
+    ep = UCX.Endpoint(worker, IPv4("127.0.0.1"), port)
 
     data = "Hello world"
-    send(ep, Int[sizeof(data)], sizeof(Int), 777)
+    send(ep, Int[sizeof(data)], sizeof(Int))
     stream_send(ep, data, sizeof(data))
     buffer = Array{UInt8}(undef, sizeof(data))
     stream_recv(ep, buffer, sizeof(buffer))

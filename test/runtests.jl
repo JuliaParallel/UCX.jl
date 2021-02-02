@@ -22,7 +22,7 @@ end
 
     @testset "Client-Server" begin
         script = joinpath(examples_dir, "client_server.jl")
-        for i in 0:0
+        for i in 0:2
             @test success(pipeline(`$cmd $script test $(2^i)`, stderr=stderr, stdout=stdout))
         end
     end

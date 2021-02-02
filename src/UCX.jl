@@ -1,6 +1,7 @@
 module UCX
 
 using Sockets: InetAddr, IPv4, listenany
+using Random
 
 include("api.jl")
 
@@ -376,10 +377,12 @@ end
 ##
 
 function send_callback(request::Ptr{Cvoid}, status::API.ucs_status_t)
+    @check status
     nothing
 end
 
 function recv_callback(request::Ptr{Cvoid}, status::API.ucs_status_t, info::Ptr{API.ucp_tag_recv_info_t})
+    @check status
     nothing
 end
 
@@ -417,7 +420,7 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
     dt = ucp_dt_make_contig(1)
     cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}))
 
-    GC.@preserve buffer begin
+    GC.@preserve buffer cb begin
         data = pointer(buffer)
         ptr = API.ucp_tag_recv_nb(worker, data, nbytes, dt, tag, tag_mask, cb)
         return handle_request(worker, ptr)
@@ -453,37 +456,123 @@ end
 
 # UCX stream interface
 
+function stream_recv_callback(request::Ptr{Cvoid}, status::API.ucs_status_t, length::Csize_t)
+    @check status
+    nothing
+end
+
 function stream_send(ep::UCXEndpoint, buffer, nbytes)
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        stream_send(ep, data, nbytes)
+    end
+end
+
+function stream_send(ep::UCXEndpoint, ref::Ref{T}) where T
+    GC.@preserve ref begin
+        data = Base.unsafe_convert(Ptr{Cvoid}, ref)
+        stream_send(ep, data, sizeof(T))
+    end
+end
+
+function stream_send(ep::UCXEndpoint, data::Ptr, nbytes)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
 
-    GC.@preserve buffer begin
-        data = pointer(buffer)
-
-        ptr = API.ucp_stream_send_nb(ep, data, nbytes, dt, cb, #=flags=# 0)
-        return handle_request(ep, ptr)
-    end
+    ptr = API.ucp_stream_send_nb(ep, data, nbytes, dt, cb, #=flags=# 0)
+    return handle_request(ep, ptr)
 end
 
 function stream_recv(ep::UCXEndpoint, buffer, nbytes)
-    dt = ucp_dt_make_contig(1) # since we are sending nbytes
-    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t))
-
     GC.@preserve buffer begin
         data = pointer(buffer)
-
-        length = Ref{Csize_t}(0)
-        ptr = API.ucp_stream_recv_nb(ep, data, nbytes, dt, cb, length, API.UCP_STREAM_RECV_FLAG_WAITALL)
-        return handle_request(ep, ptr)
+        stream_recv(ep, data, nbytes)
     end
 end
 
-# RMA
+function stream_recv(ep::UCXEndpoint, ref::Ref{T}) where T
+    GC.@preserve ref begin
+        data = Base.unsafe_convert(Ptr{Cvoid}, ref)
+        stream_recv(ep, data, sizeof(T))
+    end
+end
 
-# Atomics
+function stream_recv(ep::UCXEndpoint, data::Ptr, nbytes)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(stream_recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Csize_t))
 
-# AM
+    length = Ref{Csize_t}(0)
+    ptr = API.ucp_stream_recv_nb(ep, data, nbytes, dt, cb, length, API.UCP_STREAM_RECV_FLAG_WAITALL)
+    return handle_request(ep, ptr)
+end
 
-# Collectives
+### TODO: stream_recv_data_nb
+### TODO: stream_recv_nbx
+
+## RMA
+
+## Atomics
+
+## AM
+
+## Collectives
+
+# Higher-Level API
+
+mutable struct Endpoint
+    ep::UCXEndpoint
+    msg_tag_send::API.ucp_tag_t
+    msg_tag_recv::API.ucp_tag_t
+end
+
+# TODO: Tag structure
+# OMPI uses msg_tag (24) | source_rank (20) | context_id (20)
+
+tag(kind, seed, port) = hash(kind, hash(seed, hash(port)))
+
+function Endpoint(worker::UCXWorker, addr, port)
+    ep = UCX.UCXEndpoint(worker, addr, port)
+    Endpoint(ep, false)
+end
+
+function Endpoint(worker::UCXWorker, connection::UCXConnectionRequest)
+    ep = UCX.UCXEndpoint(worker, connection)
+    Endpoint(ep, true)
+end
+
+function Endpoint(ep::UCXEndpoint, listener)
+    seed = rand(UInt128) 
+    pid = getpid()
+    msg_tag = tag(:ctrl, seed, pid)
+
+    send_tag = Ref(msg_tag)
+    recv_tag = Ref(msg_tag)
+    if listener
+        stream_send(ep, send_tag)
+        stream_recv(ep, recv_tag)
+    else
+        stream_recv(ep, recv_tag)
+        stream_send(ep, send_tag)
+    end
+    @assert msg_tag !== recv_tag[]
+
+    Endpoint(ep, msg_tag, recv_tag[])
+end
+
+function send(ep::Endpoint, buffer, nbytes)
+    send(ep.ep, buffer, nbytes, ep.msg_tag_send)
+end
+
+function recv(ep::Endpoint, buffer, nbytes)
+    recv(ep.ep.worker, buffer, nbytes, ep.msg_tag_recv)
+end
+
+function stream_send(ep::Endpoint, args...)
+    stream_send(ep.ep, args...)
+end
+
+function stream_recv(ep::Endpoint, args...)
+    stream_recv(ep.ep, args...)
+end
 
 end #module
