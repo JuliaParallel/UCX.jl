@@ -72,6 +72,18 @@ macro async_showerr(ex)
     end)
 end
 
+macro spawn_showerr(ex)
+    esc(quote
+        Base.Threads.@spawn try
+            $ex
+        catch err
+            bt = catch_backtrace()
+            showerror(stderr, err, bt)
+            rethrow()
+        end
+    end)
+end
+
 # Config
 
 function version()
