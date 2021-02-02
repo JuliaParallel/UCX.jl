@@ -23,6 +23,8 @@ end
     val
 end
 
+# Exceptions/Status
+
 uintptr_t(ptr::Ptr) = reinterpret(UInt, ptr)
 uintptr_t(status::API.ucs_status_t) = reinterpret(UInt, convert(Int, status))
 
@@ -43,6 +45,22 @@ macro check(ex)
     end
 end
 
+# Utils
+
+macro async_showerr(ex)
+    esc(quote
+        @async try
+            $ex
+        catch err
+            bt = catch_backtrace()
+            showerror(stderr, err, bt)
+            rethrow()
+        end
+    end)
+end
+
+# Config
+
 function version()
     major = Ref{Cuint}()
     minor = Ref{Cuint}()
@@ -54,13 +72,13 @@ end
 mutable struct UCXConfig
     handle::Ptr{API.ucp_config_t}
 
-    function UCXConfig(;kwargs...)
+    function UCXConfig(; ERROR_SIGNALS = "SIGILL,SIGBUS,SIGFPE", kwargs...)
         r_handle = Ref{Ptr{API.ucp_config_t}}()
         @check API.ucp_config_read(C_NULL, C_NULL, r_handle) # XXX: Prefix is broken
 
         config = new(r_handle[])
         finalizer(config) do config
-            API.ucp_config_release(config.handle)
+            API.ucp_config_release(config)
         end
 
         for (key, value) in kwargs
@@ -70,9 +88,10 @@ mutable struct UCXConfig
         config
     end
 end
+Base.unsafe_convert(::Type{Ptr{API.ucp_config_t}}, config::UCXConfig) = config.handle
 
 function Base.setindex!(config::UCXConfig, value::String, key::Union{String, Symbol})
-    @check API.ucp_config_modify(config.handle, key, value)
+    @check API.ucp_config_modify(config, key, value)
     return value
 end
 
@@ -85,7 +104,7 @@ function Base.parse(::Type{Dict}, config::UCXConfig)
     systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
 
     try
-        API.ucp_config_print(config.handle, fd, C_NULL, API.UCS_CONFIG_PRINT_CONFIG)
+        API.ucp_config_print(config, fd, C_NULL, API.UCS_CONFIG_PRINT_CONFIG)
         systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
     catch
         Base.Libc.free(ptr[])
@@ -126,15 +145,16 @@ mutable struct UCXContext
         r_handle = Ref{API.ucp_context_h}()
         # UCP.ucp_init is a header function so we call, UCP.ucp_init_version
         @check API.ucp_init_version(API.UCP_API_MAJOR, API.UCP_API_MINOR,
-                                    params, config.handle, r_handle)
+                                    params, config, r_handle)
 
         context = new(r_handle[], parse(Dict, config))
 
         finalizer(context) do context
-            API.ucp_cleanup(context.handle)
+            API.ucp_cleanup(context)
         end
     end
 end
+Base.unsafe_convert(::Type{API.ucp_context_h}, ctx::UCXContext) = ctx.handle
 
 function info(ucx::UCXContext)
     ptr  = Ref{Ptr{Cchar}}()
@@ -145,7 +165,7 @@ function info(ucx::UCXContext)
     systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
 
     try
-        API.ucp_context_print_info(ucx.handle, fd)
+        API.ucp_context_print_info(ucx, fd)
         systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
     catch
         Base.Libc.free(ptr[])
@@ -172,18 +192,19 @@ mutable struct UCXWorker
         set!(params, :thread_mode, thread_mode)
 
         r_handle = Ref{API.ucp_worker_h}()
-        @check API.ucp_worker_create(context.handle, params, r_handle)
+        @check API.ucp_worker_create(context, params, r_handle)
 
         worker = new(r_handle[], context)
         finalizer(worker) do worker
-            API.ucp_worker_destroy(worker.handle)
+            API.ucp_worker_destroy(worker)
         end
         return worker
     end
 end
+Base.unsafe_convert(::Type{API.ucp_worker_h}, worker::UCXWorker) = worker.handle
 
 function progress(worker::UCXWorker)
-    API.ucp_worker_progress(worker.handle) !== 0
+    API.ucp_worker_progress(worker) !== 0
 end
 
 struct UCXConnectionRequest
@@ -198,19 +219,30 @@ mutable struct UCXEndpoint
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
         endpoint = new(handle, worker, true)
         finalizer(endpoint) do endpoint
-            status = API.ucp_ep_close_nb(endpoint.handle, API.UCP_EP_CLOSE_MODE_FLUSH)
-            if UCS_PTR_IS_PTR(status)
-                while API.ucp_request_check_status(status) == API.UCS_INPROGRESS
-                    progress(worker)
+            # NOTE: Generally not safe to spin in finalizer
+            #   - ucp_ep_destroy
+            #   - ucp_ep_close_nb (Gracefully shutdown)
+            #     - UCP_EP_CLOSE_MODE_FORCE
+            #     - UCP_EP_CLOSE_MODE_FLUSH
+            let handle = endpoint.handle # Valid since we are aleady finalizing endpoint
+                @async_showerr begin
+                    status = API.ucp_ep_close_nb(handle, API.UCP_EP_CLOSE_MODE_FLUSH)
+                    if UCS_PTR_IS_PTR(status)
+                        while API.ucp_request_check_status(status) == API.UCS_INPROGRESS
+                            progress(worker)
+                            yield()
+                        end
+                        API.ucp_request_free(status)
+                    else
+                        @check UCS_PTR_STATUS(status)
+                    end
                 end
-                API.ucp_request_free(status)
-            else
-                @check UCS_PTR_STATUS(status)
             end
         end
         endpoint
     end
 end
+Base.unsafe_convert(::Type{API.ucp_ep_h}, ep::UCXEndpoint) = ep.handle
 
 function Base.isopen(ep::UCXEndpoint)
     ep.open
@@ -235,7 +267,7 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
 
         # TODO: Error callback
     
-        @check API.ucp_ep_create(worker.handle, params, r_handle)
+        @check API.ucp_ep_create(worker, params, r_handle)
     end
 
     UCXEndpoint(worker, r_handle[])
@@ -255,7 +287,7 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     # TODO: Error callback
 
     r_handle = Ref{API.ucp_ep_h}()
-    @check API.ucp_ep_create(worker.handle, params, r_handle)
+    @check API.ucp_ep_create(worker, params, r_handle)
 
     UCXEndpoint(worker, r_handle[])
 end
@@ -295,18 +327,19 @@ mutable struct UCXListener
             set!(params, :sockaddr, ucs_sockaddr)
             set!(params, :conn_handler, conn_handler)
 
-            @check API.ucp_listener_create(worker.handle, params, r_handle)
+            @check API.ucp_listener_create(worker, params, r_handle)
         end  
 
         listener = new(r_handle[], worker, port)
         finalizer(listener) do listener
-            API.ucp_listener_destroy(listener.handle)
+            API.ucp_listener_destroy(listener)
         end
     end
 end
+Base.unsafe_convert(::Type{API.ucp_listener_h}, listener::UCXListener) = listener.handle
 
 function reject(listener::UCXListener, conn_request::UCXConnectionRequest)
-    @check API.ucp_listener_reject(listener.handle, conn_request.handle)
+    @check API.ucp_listener_reject(listener, conn_request.handle)
 end
 
 function ucp_dt_make_contig(elem_size)
@@ -350,7 +383,7 @@ function send(ep::UCXEndpoint, buffer, nbytes, tag)
     GC.@preserve buffer begin
         data = pointer(buffer)
 
-        ptr = API.ucp_tag_send_nb(ep.handle, data, nbytes, dt, tag, cb)
+        ptr = API.ucp_tag_send_nb(ep, data, nbytes, dt, tag, cb)
         return handle_request(ep, ptr)
     end
 end
@@ -361,7 +394,7 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
 
     GC.@preserve buffer begin
         data = pointer(buffer)
-        ptr = API.ucp_tag_recv_nb(worker.handle, data, nbytes, dt, tag, tag_mask, cb)
+        ptr = API.ucp_tag_recv_nb(worker, data, nbytes, dt, tag, tag_mask, cb)
         return handle_request(worker, ptr)
     end
 end
@@ -373,7 +406,7 @@ end
 
 function probe(worker::UCXWorker, tag, tag_mask=~zero(UCX.API.ucp_tag_t), remove=true)
     info = Ref{API.ucp_tag_recv_info_t}()
-    message_h = API.ucp_tag_probe_nb(worker.handle, tag, tag_mask, remove, info)
+    message_h = API.ucp_tag_probe_nb(worker, tag, tag_mask, remove, info)
     if message_h === C_NULL
         return nothing
     else
@@ -388,7 +421,7 @@ function recv(worker::UCXWorker, msg::UCXMessage, buffer, nbytes)
     GC.@preserve data begin
         data = pointer(buffer)
 
-        ptr = API.ucp_tag_msg_recv_nb(worker.handle, data, nbytes, dt, msg.handle, cb)
+        ptr = API.ucp_tag_msg_recv_nb(worker, data, nbytes, dt, msg.handle, cb)
         return handle_request(worker, ptr)
     end
 end
@@ -402,7 +435,7 @@ function stream_send(ep::UCXEndpoint, buffer, nbytes)
     GC.@preserve buffer begin
         data = pointer(buffer)
 
-        ptr = API.ucp_stream_send_nb(ep.handle, data, nbytes, dt, cb, #=flags=# 0)
+        ptr = API.ucp_stream_send_nb(ep, data, nbytes, dt, cb, #=flags=# 0)
         return handle_request(ep, ptr)
     end
 end
@@ -415,7 +448,7 @@ function stream_recv(ep::UCXEndpoint, buffer, nbytes)
         data = pointer(buffer)
 
         length = Ref{Csize_t}(0)
-        ptr = API.ucp_stream_recv_nb(ep.handle, data, nbytes, dt, cb, length, API.UCP_STREAM_RECV_FLAG_WAITALL)
+        ptr = API.ucp_stream_recv_nb(ep, data, nbytes, dt, cb, length, API.UCP_STREAM_RECV_FLAG_WAITALL)
         return handle_request(ep, ptr)
     end
 end
