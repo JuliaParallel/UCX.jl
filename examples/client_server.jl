@@ -38,7 +38,7 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
     listener = UCX.UCXListener(worker, port, cb)
     push!(ch_port, listener.port)
 
-    GC.@preserve listener begin
+    GC.@preserve listener cb begin
         while expected_clients[] > 0
             UCX.progress(worker)
             yield()
