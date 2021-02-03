@@ -238,6 +238,8 @@ function progress(worker::UCXWorker)
     API.ucp_worker_progress(worker) !== 0
 end
 
+include("idle.jl")
+
 struct UCXConnectionRequest
     handle::API.ucp_conn_request_h
 end
@@ -416,14 +418,9 @@ end
 
 Base.notify(req::UCXRequest) = notify(req.event)
 function Base.wait(req::UCXRequest)
-    # wait(req.event)
-    # Note: Spin-loop only valid on 1.5 since we have a call to yield
-    #       and LLVM can't optimize the load away. Would be great if
-    #       Julia had a `wait(::Event, progress)` mechanism.
-    while !req.event.set
-        yield()
-        progress(req.worker)
-    end
+    # We rely on UvWorkerIdle on making progress
+    # so it is safe to suspend the task fully
+    wait(req.event)
     @check req.status
 end
 
