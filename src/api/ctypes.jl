@@ -43,5 +43,10 @@ module IP
         host_in = in_addr(hton(addr.host.host))
         sockaddr_in(hton(convert(Cushort, addr.port)), host_in)
     end
+
+    struct sockaddr_storage
+        data::NTuple{128, UInt8} # _SS_SIZE
+    end
 end
 const sockaddr = IP.sockaddr_in
+const sockaddr_storage = IP.sockaddr_storage
