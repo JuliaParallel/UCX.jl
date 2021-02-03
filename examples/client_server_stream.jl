@@ -15,18 +15,23 @@ function echo_server(ep::UCX.Endpoint)
     data = Array{UInt8}(undef, size[1])
     wait(stream_recv(ep, data, sizeof(data)))
     wait(stream_send(ep, data, sizeof(data)))
-    atomic_sub!(expected_clients, 1)
 end
 
 function start_server(ch_port = Channel{Int}(1), port = default_port)
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
+    idler = UCX.UvWorkerIdle(worker)
 
     function listener_callback(conn_request_h::UCX.API.ucp_conn_request_h, args::Ptr{Cvoid})
         conn_request = UCX.UCXConnectionRequest(conn_request_h)
         Threads.@spawn begin
             try
                 echo_server(UCX.Endpoint($worker, $conn_request))
+                old = atomic_sub!(expected_clients, 1)
+                @assert old > 0
+                if old == 1
+                    close($idler)
+                end
             catch err
                 showerror(stderr, err, catch_backtrace())
                 exit(-1) # Fatal error
@@ -39,16 +44,14 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
     push!(ch_port, listener.port)
 
     GC.@preserve listener cb begin
-        while expected_clients[] > 0
-            UCX.progress(worker)
-            yield()
-        end
+        wait(idler)
     end
 end
 
 function start_client(port = default_port)
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
+    idler = UCX.UvWorkerIdle(worker)
     ep = UCX.Endpoint(worker, IPv4("127.0.0.1"), port)
 
     data = "Hello world"
@@ -60,6 +63,7 @@ function start_client(port = default_port)
     wait(req2)
     wait(req3)
     @assert String(buffer) == data
+    close(idler)
 end
 
 if !isinteractive()
