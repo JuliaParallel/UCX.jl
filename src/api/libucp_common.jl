@@ -58,6 +58,10 @@ end
     UCP_EP_PARAMS_FLAGS_NO_LOOPBACK = 2
 end
 
+@cenum ucp_ep_close_flags_t::UInt32 begin
+    UCP_EP_CLOSE_FLAG_FORCE = 1
+end
+
 @cenum ucp_ep_close_mode::UInt32 begin
     UCP_EP_CLOSE_MODE_FORCE = 0
     UCP_EP_CLOSE_MODE_FLUSH = 1
@@ -88,6 +92,10 @@ end
 
 @cenum ucp_listener_attr_field::UInt32 begin
     UCP_LISTENER_ATTR_FIELD_SOCKADDR = 1
+end
+
+@cenum ucp_conn_request_attr_field::UInt32 begin
+    UCP_CONN_REQUEST_ATTR_FIELD_CLIENT_ADDR = 1
 end
 
 @cenum ucp_dt_type::UInt32 begin
@@ -129,8 +137,30 @@ end
     UCP_ATOMIC_FETCH_OP_LAST = 6
 end
 
+@cenum ucp_atomic_op_t::UInt32 begin
+    UCP_ATOMIC_OP_ADD = 0
+    UCP_ATOMIC_OP_SWAP = 1
+    UCP_ATOMIC_OP_CSWAP = 2
+    UCP_ATOMIC_OP_AND = 3
+    UCP_ATOMIC_OP_OR = 4
+    UCP_ATOMIC_OP_XOR = 5
+    UCP_ATOMIC_OP_LAST = 6
+end
+
 @cenum ucp_stream_recv_flags_t::UInt32 begin
     UCP_STREAM_RECV_FLAG_WAITALL = 1
+end
+
+@cenum ucp_op_attr_t::UInt32 begin
+    UCP_OP_ATTR_FIELD_REQUEST = 1
+    UCP_OP_ATTR_FIELD_CALLBACK = 2
+    UCP_OP_ATTR_FIELD_USER_DATA = 4
+    UCP_OP_ATTR_FIELD_DATATYPE = 8
+    UCP_OP_ATTR_FIELD_FLAGS = 16
+    UCP_OP_ATTR_FIELD_REPLY_BUFFER = 32
+    UCP_OP_ATTR_FLAG_NO_IMM_CMPL = 65536
+    UCP_OP_ATTR_FLAG_FAST_CMPL = 131072
+    UCP_OP_ATTR_FLAG_FORCE_IMM_CMPL = 262144
 end
 
 
@@ -198,7 +228,6 @@ struct ucp_worker_params
 end
 
 const ucp_worker_params_t = ucp_worker_params
-const sockaddr_storage = sockaddr
 
 struct ucp_listener_attr
     field_mask::UInt64
@@ -206,6 +235,13 @@ struct ucp_listener_attr
 end
 
 const ucp_listener_attr_t = ucp_listener_attr
+
+struct ucp_conn_request_attr
+    field_mask::UInt64
+    client_address::sockaddr_storage
+end
+
+const ucp_conn_request_attr_t = ucp_conn_request_attr
 const ucp_listener_accept_callback_t = Ptr{Cvoid}
 
 struct ucp_listener_accept_handler
@@ -256,6 +292,24 @@ const ucp_tag_t = UInt64
 struct ucp_tag_recv_info
     sender_tag::ucp_tag_t
     length::Csize_t
+end
+
+const ucp_send_nbx_callback_t = Ptr{Cvoid}
+
+struct ANONYMOUS1_cb
+    send::ucp_send_nbx_callback_t
+end
+
+const ucp_datatype_t = UInt64
+
+struct ucp_request_param_t
+    op_attr_mask::UInt32
+    flags::UInt32
+    request::Ptr{Cvoid}
+    cb::ANONYMOUS1_cb
+    datatype::ucp_datatype_t
+    user_data::Ptr{Cvoid}
+    reply_buffer::Ptr{Cvoid}
 end
 
 @cenum ucp_mem_advice::UInt32 begin
@@ -313,7 +367,6 @@ const ucp_worker = Cvoid
 const ucp_worker_h = Ptr{ucp_worker}
 const ucp_recv_desc = Cvoid
 const ucp_tag_message_h = Ptr{ucp_recv_desc}
-const ucp_datatype_t = UInt64
 const ucp_send_callback_t = Ptr{Cvoid}
 const ucp_err_handler_cb_t = Ptr{Cvoid}
 
@@ -324,7 +377,9 @@ end
 
 const ucp_err_handler_t = ucp_err_handler
 const ucp_stream_recv_callback_t = Ptr{Cvoid}
+const ucp_stream_recv_nbx_callback_t = Ptr{Cvoid}
 const ucp_tag_recv_callback_t = Ptr{Cvoid}
+const ucp_tag_recv_nbx_callback_t = Ptr{Cvoid}
 
 @cenum ucp_wakeup_event_types::UInt32 begin
     UCP_WAKEUP_RMA = 1
@@ -358,6 +413,6 @@ const ucp_ep_params_t = ucp_ep_params
 const UCP_VERSION_MAJOR_SHIFT = 24
 const UCP_VERSION_MINOR_SHIFT = 16
 const UCP_API_MAJOR = 1
-const UCP_API_MINOR = 7
+const UCP_API_MINOR = 9
 
-# Skipping MacroDefinition: UCP_API_VERSION UCP_VERSION ( 1 , 7 )
+# Skipping MacroDefinition: UCP_API_VERSION UCP_VERSION ( 1 , 9 )

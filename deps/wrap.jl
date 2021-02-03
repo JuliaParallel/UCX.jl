@@ -37,6 +37,4 @@ function wrap_ucx_component(name)
     
     run(wc)
 end
-wrap_ucx_component("ucm")
-wrap_ucx_component("uct")
 wrap_ucx_component("ucp")

@@ -16,6 +16,8 @@ function __init__()
 
     # reinstall signal handlers
     ccall((:ucs_debug_disable_signals, API.libucs), Cvoid, ())
+
+    @assert version() >= VersionNumber(API.UCP_API_MAJOR, API.UCP_API_MINOR)
 end
 
 function memzero!(ref::Ref)
