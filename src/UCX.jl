@@ -238,8 +238,6 @@ function progress(worker::UCXWorker)
     API.ucp_worker_progress(worker) !== 0
 end
 
-include("idle.jl")
-
 struct UCXConnectionRequest
     handle::API.ucp_conn_request_h
 end
