@@ -10,22 +10,21 @@ const expected_clients = Atomic{Int}(0)
 
 function echo_server(ep::UCX.Endpoint)
     size = Int[0]
-    recv(ep, size, sizeof(Int))
+    wait(recv(ep, size, sizeof(Int)))
     data = Array{UInt8}(undef, size[1])
-    recv(ep, data, sizeof(data))
-    send(ep, data, sizeof(data))
-    atomic_sub!(expected_clients, 1)
+    wait(recv(ep, data, sizeof(data)))
+    wait(send(ep, data, sizeof(data)))
 end
 
 function start_server(ch_port = Channel{Int}(1), port = default_port)
     ctx = UCX.UCXContext()
-    worker = UCX.UCXWorker(ctx)
+    worker = UCX.Worker(ctx)
 
-    function listener_callback(conn_request_h::UCX.API.ucp_conn_request_h, args::Ptr{Cvoid})
-        conn_request = UCX.UCXConnectionRequest(conn_request_h)
+    function listener_callback(::UCX.UCXListener, conn_request::UCX.UCXConnectionRequest)
         Threads.@spawn begin
             try
                 echo_server(UCX.Endpoint($worker, $conn_request))
+                atomic_sub!(expected_clients, 1)
             catch err
                 showerror(stderr, err, catch_backtrace())
                 exit(-1) # Fatal
@@ -33,29 +32,31 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
         end
         nothing
     end
-    cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
-    listener = UCX.UCXListener(worker, port, cb)
+    listener = UCX.UCXListener(worker.worker, listener_callback, port)
     push!(ch_port, listener.port)
 
-    GC.@preserve listener cb begin
+    GC.@preserve listener begin
         while expected_clients[] > 0
-            UCX.progress(worker)
-            yield()
+            wait(worker)
         end
+        close(worker)
     end
 end
 
 function start_client(port=default_port)
     ctx = UCX.UCXContext()
-    worker = UCX.UCXWorker(ctx)
+    worker = UCX.Worker(ctx)
     ep = UCX.Endpoint(worker, IPv4("127.0.0.1"), port)
 
     data = "Hello world"
-    send(ep, Int[sizeof(data)], sizeof(Int))
-    send(ep, data, sizeof(data))
+    req1 = send(ep, Int[sizeof(data)], sizeof(Int)) # XXX: Order gurantuees?
+    req2 = send(ep, data, sizeof(data))
+    wait(req1); wait(req2)
     buffer = Array{UInt8}(undef, sizeof(data))
-    recv(ep, buffer, sizeof(buffer))
+    wait(recv(ep, buffer, sizeof(buffer)))
     @assert String(buffer) == data
+
+    close(worker)
 end
 
 if !isinteractive()
