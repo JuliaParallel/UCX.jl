@@ -319,6 +319,9 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
 end
 
 function listener_callback(conn_request_h::API.ucp_conn_request_h, args::Ptr{Cvoid})
+    conn_request = UCX.UCXConnectionRequest(conn_request_h)
+    listener = Base.unsafe_pointer_to_objref(args)::UCXListener
+    Base.invokelatest(listener.callback, listener, conn_request)
     nothing
 end
 
@@ -326,10 +329,9 @@ mutable struct UCXListener
     handle::API.ucp_listener_h
     worker::UCXWorker
     port::Cint
+    callback::Any
 
-    function UCXListener(worker::UCXWorker, port=nothing,
-                         callback::Union{Ptr{Cvoid}, Base.CFunction} = @cfunction(listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})),
-                         args::Ptr{Cvoid} = C_NULL)
+    function UCXListener(worker::UCXWorker, callback, port=nothing)
         # Choose free port
         if port === nothing || port == 0
             port_hint = 9000 + (getpid() % 1000)
@@ -340,10 +342,14 @@ mutable struct UCXListener
         field_mask   = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
                        API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
         sockaddr     = Ref(API.IP.sockaddr_in(InetAddr(IPv4(API.IP.INADDR_ANY), port)))
-        conn_handler = API.ucp_listener_conn_handler(Base.unsafe_convert(Ptr{Cvoid}, callback), args)
+
+        this = new(C_NULL, worker, port, callback)
 
         r_handle = Ref{API.ucp_listener_h}()
-        GC.@preserve sockaddr begin
+        GC.@preserve sockaddr this begin
+            args = Base.pointer_from_objref(this)
+            conn_handler = API.ucp_listener_conn_handler(@cfunction(listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})), args)
+
             ptr = Base.unsafe_convert(Ptr{API.sockaddr}, sockaddr)
             ucs_sockaddr = API.ucs_sock_addr(ptr, sizeof(sockaddr))
 
@@ -354,12 +360,15 @@ mutable struct UCXListener
             set!(params, :conn_handler, conn_handler)
 
             @check API.ucp_listener_create(worker, params, r_handle)
-        end  
+        end
 
-        listener = new(r_handle[], worker, port)
-        finalizer(listener) do listener
+        this.handle = r_handle[]
+
+        finalizer(this) do listener
             API.ucp_listener_destroy(listener)
         end
+
+        this
     end
 end
 Base.unsafe_convert(::Type{API.ucp_listener_h}, listener::UCXListener) = listener.handle

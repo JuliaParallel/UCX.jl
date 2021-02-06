@@ -21,24 +21,22 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
     ctx = UCX.UCXContext()
     worker = UCX.Worker(ctx)
 
-    function listener_callback(conn_request_h::UCX.API.ucp_conn_request_h, args::Ptr{Cvoid})
-        conn_request = UCX.UCXConnectionRequest(conn_request_h)
+    function listener_callback(::UCX.UCXListener, conn_request::UCX.UCXConnectionRequest)
         Threads.@spawn begin
             try
                 echo_server(UCX.Endpoint($worker, $conn_request))
                 atomic_sub!(expected_clients, 1)
             catch err
                 showerror(stderr, err, catch_backtrace())
-                exit(-1) # Fatal error
+                exit(-1) # Fatal
             end
         end
         nothing
     end
-    cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
-    listener = UCX.UCXListener(worker.worker, port, cb)
+    listener = UCX.UCXListener(worker.worker, listener_callback, port)
     push!(ch_port, listener.port)
 
-    GC.@preserve listener cb begin
+    GC.@preserve listener begin
         while expected_clients[] > 0
             wait(worker)
         end
