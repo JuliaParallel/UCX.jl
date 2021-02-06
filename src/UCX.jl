@@ -573,7 +573,29 @@ end
 
 # Higher-Level API
 
+mutable struct Worker
+    worker::UCXWorker
+    timer::Base.Timer
+    function Worker(ctx::UCXContext)
+        worker = UCXWorker(ctx)
+        timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
+            try
+                UCX.progress(worker)
+            catch err
+                showerror(stderr, err, catch_backtrace())
+                rethrow()
+            end
+        end
+        @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
+        return new(worker, timer)
+    end
+end
+
+Base.wait(worker::Worker) = wait(worker.timer)
+Base.close(worker::Worker) = close(worker.timer)
+
 mutable struct Endpoint
+    worker::Worker
     ep::UCXEndpoint
     msg_tag_send::API.ucp_tag_t
     msg_tag_recv::API.ucp_tag_t
@@ -584,17 +606,17 @@ end
 
 tag(kind, seed, port) = hash(kind, hash(seed, hash(port)))
 
-function Endpoint(worker::UCXWorker, addr, port)
-    ep = UCX.UCXEndpoint(worker, addr, port)
-    Endpoint(ep, false)
+function Endpoint(worker::Worker, addr, port)
+    ep = UCX.UCXEndpoint(worker.worker, addr, port)
+    Endpoint(worker, ep, false)
 end
 
-function Endpoint(worker::UCXWorker, connection::UCXConnectionRequest)
-    ep = UCX.UCXEndpoint(worker, connection)
-    Endpoint(ep, true)
+function Endpoint(worker::Worker, connection::UCXConnectionRequest)
+    ep = UCX.UCXEndpoint(worker.worker, connection)
+    Endpoint(worker, ep, true)
 end
 
-function Endpoint(ep::UCXEndpoint, listener)
+function Endpoint(worker::Worker, ep::UCXEndpoint, listener)
     seed = rand(UInt128) 
     pid = getpid()
     msg_tag = tag(:ctrl, seed, pid)
@@ -613,7 +635,7 @@ function Endpoint(ep::UCXEndpoint, listener)
 
     @assert msg_tag !== recv_tag[]
 
-    Endpoint(ep, msg_tag, recv_tag[])
+    Endpoint(worker, ep, msg_tag, recv_tag[])
 end
 
 function send(ep::Endpoint, buffer, nbytes)

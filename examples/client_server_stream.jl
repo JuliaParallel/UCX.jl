@@ -19,16 +19,7 @@ end
 
 function start_server(ch_port = Channel{Int}(1), port = default_port)
     ctx = UCX.UCXContext()
-    worker = UCX.UCXWorker(ctx)
-    timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
-        try
-            UCX.progress(worker)
-        catch err
-            showerror(stderr, err, catch_backtrace())
-            rethrow()
-        end
-    end
-    @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
+    worker = UCX.Worker(ctx)
 
     function listener_callback(conn_request_h::UCX.API.ucp_conn_request_h, args::Ptr{Cvoid})
         conn_request = UCX.UCXConnectionRequest(conn_request_h)
@@ -44,30 +35,20 @@ function start_server(ch_port = Channel{Int}(1), port = default_port)
         nothing
     end
     cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
-    listener = UCX.UCXListener(worker, port, cb)
+    listener = UCX.UCXListener(worker.worker, port, cb)
     push!(ch_port, listener.port)
 
     GC.@preserve listener cb begin
         while expected_clients[] > 0
-            @assert isopen(timer)
-            wait(timer)
+            wait(worker)
         end
-        close(timer)
+        close(worker)
     end
 end
 
 function start_client(port = default_port)
     ctx = UCX.UCXContext()
-    worker = UCX.UCXWorker(ctx)
-    timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
-        try
-            UCX.progress(worker)
-        catch err
-            showerror(stderr, err, catch_backtrace())
-            rethrow()
-        end
-    end
-    @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
+    worker = UCX.Worker(ctx)
 
     ep = UCX.Endpoint(worker, IPv4("127.0.0.1"), port)
 
@@ -80,7 +61,7 @@ function start_client(port = default_port)
     wait(req2)
     wait(req3)
     @assert String(buffer) == data
-    close(timer)
+    close(worker)
 end
 
 if !isinteractive()
