@@ -983,6 +983,35 @@ end
 
 # UCX probe & probe msg receive
 
+struct UCXMessage
+    handle::API.ucp_tag_message_h
+    info::API.ucp_tag_recv_info_t
+end
+
+function probe(worker::UCXWorker, tag, tag_mask=~zero(UCX.API.ucp_tag_t); remove=true)
+    info = Ref{API.ucp_tag_recv_info_t}()
+    msg = API.ucp_tag_probe_nb(worker, tag, tag_mask, remove, info)
+    if msg == C_NULL
+        return nothing
+    else
+        return UCXMessage(msg, info[])
+    end
+end
+
+# function recv(worker::UCXWorker, buffer, nbytes, msg::UCXMessage)
+#     dt = ucp_dt_make_contig(1) # since we are receiving nbytes
+#     request = UCXRequest(worker, buffer) # rooted through worker
+#     cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}, Ptr{Cvoid}))
+
+#     param = request_param(dt, request, cb)
+
+#     GC.@preserve buffer begin
+#         data = pointer(buffer)
+#         ptr = API.ucp_tag_msg_recv_nbx(worker, data, nbytes, tag, tag_mask, param)
+#         return handle_request(request, ptr)
+#     end
+# end
+
 ##
 # UCX stream interface
 ##
