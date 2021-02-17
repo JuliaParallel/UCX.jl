@@ -322,10 +322,6 @@ end
 
 const ucp_send_nbx_callback_t = Ptr{Cvoid}
 
-struct ANONYMOUS1_cb
-    send::ucp_send_nbx_callback_t
-end
-
 struct ANONYMOUS2_recv_info
     length::Ptr{Csize_t}
 end
@@ -336,7 +332,7 @@ struct ucp_request_param_t
     op_attr_mask::UInt32
     flags::UInt32
     request::Ptr{Cvoid}
-    cb::ANONYMOUS1_cb
+    cb::ucp_send_nbx_callback_t
     datatype::ucp_datatype_t
     user_data::Ptr{Cvoid}
     reply_buffer::Ptr{Cvoid}
