@@ -2,7 +2,7 @@
 
 
 # Skipping MacroDefinition: ucp_dt_make_contig ( _elem_size ) ( ( ( ucp_datatype_t ) ( _elem_size ) << UCP_DATATYPE_SHIFT ) | UCP_DATATYPE_CONTIG )
-# Skipping MacroDefinition: ucp_dt_make_iov ( ) ( UCP_DATATYPE_IOV )
+# Skipping MacroDefinition: ucp_dt_make_iov ( ) ( ( ucp_datatype_t ) UCP_DATATYPE_IOV )
 
 @cenum ucp_params_field::UInt32 begin
     UCP_PARAM_FIELD_FEATURES = 1
@@ -71,6 +71,8 @@ end
     UCP_MEM_MAP_PARAM_FIELD_ADDRESS = 1
     UCP_MEM_MAP_PARAM_FIELD_LENGTH = 2
     UCP_MEM_MAP_PARAM_FIELD_FLAGS = 4
+    UCP_MEM_MAP_PARAM_FIELD_PROT = 8
+    UCP_MEM_MAP_PARAM_FIELD_MEMORY_TYPE = 16
 end
 
 @cenum ucp_mem_advise_params_field::UInt32 begin
@@ -82,12 +84,14 @@ end
 @cenum ucp_context_attr_field::UInt32 begin
     UCP_ATTR_FIELD_REQUEST_SIZE = 1
     UCP_ATTR_FIELD_THREAD_MODE = 2
+    UCP_ATTR_FIELD_MEMORY_TYPES = 4
 end
 
 @cenum ucp_worker_attr_field::UInt32 begin
     UCP_WORKER_ATTR_FIELD_THREAD_MODE = 1
     UCP_WORKER_ATTR_FIELD_ADDRESS = 2
     UCP_WORKER_ATTR_FIELD_ADDRESS_FLAGS = 4
+    UCP_WORKER_ATTR_FIELD_MAX_AM_HEADER = 8
 end
 
 @cenum ucp_listener_attr_field::UInt32 begin
@@ -112,6 +116,9 @@ end
 end
 
 @cenum ucp_send_am_flags::UInt32 begin
+    UCP_AM_SEND_FLAG_REPLY = 1
+    UCP_AM_SEND_FLAG_EAGER = 2
+    UCP_AM_SEND_FLAG_RNDV = 4
     UCP_AM_SEND_REPLY = 1
 end
 
@@ -158,9 +165,24 @@ end
     UCP_OP_ATTR_FIELD_DATATYPE = 8
     UCP_OP_ATTR_FIELD_FLAGS = 16
     UCP_OP_ATTR_FIELD_REPLY_BUFFER = 32
+    UCP_OP_ATTR_FIELD_MEMORY_TYPE = 64
+    UCP_OP_ATTR_FIELD_RECV_INFO = 128
     UCP_OP_ATTR_FLAG_NO_IMM_CMPL = 65536
     UCP_OP_ATTR_FLAG_FAST_CMPL = 131072
     UCP_OP_ATTR_FLAG_FORCE_IMM_CMPL = 262144
+end
+
+@cenum ucp_am_recv_attr_t::UInt32 begin
+    UCP_AM_RECV_ATTR_FIELD_REPLY_EP = 1
+    UCP_AM_RECV_ATTR_FLAG_DATA = 65536
+    UCP_AM_RECV_ATTR_FLAG_RNDV = 131072
+end
+
+@cenum ucp_am_handler_param_field::UInt32 begin
+    UCP_AM_HANDLER_PARAM_FIELD_ID = 1
+    UCP_AM_HANDLER_PARAM_FIELD_FLAGS = 2
+    UCP_AM_HANDLER_PARAM_FIELD_CB = 4
+    UCP_AM_HANDLER_PARAM_FIELD_ARG = 8
 end
 
 
@@ -202,6 +224,7 @@ struct ucp_context_attr
     field_mask::UInt64
     request_size::Csize_t
     thread_mode::ucs_thread_mode_t
+    memory_types::UInt64
 end
 
 const ucp_context_attr_t = ucp_context_attr
@@ -214,6 +237,7 @@ struct ucp_worker_attr
     address_flags::UInt32
     address::Ptr{ucp_address_t}
     address_length::Csize_t
+    max_am_header::Csize_t
 end
 
 const ucp_worker_attr_t = ucp_worker_attr
@@ -284,6 +308,8 @@ struct ucp_mem_map_params
     address::Ptr{Cvoid}
     length::Csize_t
     flags::UInt32
+    prot::UInt32
+    memory_type::ucs_memory_type_t
 end
 
 const ucp_mem_map_params_t = ucp_mem_map_params
@@ -294,16 +320,41 @@ struct ucp_tag_recv_info
     length::Csize_t
 end
 
+const ucp_send_nbx_callback_t = Ptr{Cvoid}
+
+struct ANONYMOUS2_recv_info
+    length::Ptr{Csize_t}
+end
+
 const ucp_datatype_t = UInt64
 
 struct ucp_request_param_t
     op_attr_mask::UInt32
     flags::UInt32
     request::Ptr{Cvoid}
-    cb::Ptr{Cvoid}
+    cb::ucp_send_nbx_callback_t
     datatype::ucp_datatype_t
     user_data::Ptr{Cvoid}
     reply_buffer::Ptr{Cvoid}
+    memory_type::ucs_memory_type_t
+    recv_info::ANONYMOUS2_recv_info
+end
+
+const ucp_am_recv_callback_t = Ptr{Cvoid}
+
+struct ucp_am_handler_param
+    field_mask::UInt64
+    id::UInt32
+    flags::UInt32
+    cb::ucp_am_recv_callback_t
+    arg::Ptr{Cvoid}
+end
+
+const ucp_am_handler_param_t = ucp_am_handler_param
+
+struct ucp_am_recv_param
+    recv_attr::UInt64
+    reply_ep::ucp_ep_h
 end
 
 @cenum ucp_mem_advice::UInt32 begin
@@ -323,6 +374,7 @@ end
 
 const ucp_mem_advise_params_t = ucp_mem_advise_params
 const ucp_tag_recv_info_t = ucp_tag_recv_info
+const ucp_am_recv_param_t = ucp_am_recv_param
 const ucp_context = Cvoid
 const ucp_context_h = Ptr{ucp_context}
 const ucp_config = Cvoid
@@ -374,6 +426,7 @@ const ucp_stream_recv_callback_t = Ptr{Cvoid}
 const ucp_stream_recv_nbx_callback_t = Ptr{Cvoid}
 const ucp_tag_recv_callback_t = Ptr{Cvoid}
 const ucp_tag_recv_nbx_callback_t = Ptr{Cvoid}
+const ucp_am_recv_data_nbx_callback_t = Ptr{Cvoid}
 
 @cenum ucp_wakeup_event_types::UInt32 begin
     UCP_WAKEUP_RMA = 1
@@ -407,6 +460,6 @@ const ucp_ep_params_t = ucp_ep_params
 const UCP_VERSION_MAJOR_SHIFT = 24
 const UCP_VERSION_MINOR_SHIFT = 16
 const UCP_API_MAJOR = 1
-const UCP_API_MINOR = 9
+const UCP_API_MINOR = 10
 
-# Skipping MacroDefinition: UCP_API_VERSION UCP_VERSION ( 1 , 9 )
+# Skipping MacroDefinition: UCP_API_VERSION UCP_VERSION ( 1 , 10 )

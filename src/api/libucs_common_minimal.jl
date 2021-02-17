@@ -61,3 +61,14 @@ end
 
 const ucs_status_ptr_t = Ptr{Cvoid}
 
+@cenum ucs_memory_type::UInt32 begin
+    UCS_MEMORY_TYPE_HOST = 0
+    UCS_MEMORY_TYPE_CUDA = 1
+    UCS_MEMORY_TYPE_CUDA_MANAGED = 2
+    UCS_MEMORY_TYPE_ROCM = 3
+    UCS_MEMORY_TYPE_ROCM_MANAGED = 4
+    UCS_MEMORY_TYPE_LAST = 5
+    UCS_MEMORY_TYPE_UNKNOWN = 5
+end
+
+const ucs_memory_type_t = ucs_memory_type
