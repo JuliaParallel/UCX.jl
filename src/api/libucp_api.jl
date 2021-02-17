@@ -186,8 +186,20 @@ function ucp_worker_set_am_handler(worker, id, cb, arg, flags)
     ccall((:ucp_worker_set_am_handler, libucp), ucs_status_t, (ucp_worker_h, UInt16, ucp_am_callback_t, Ptr{Cvoid}, UInt32), worker, id, cb, arg, flags)
 end
 
+function ucp_worker_set_am_recv_handler(worker, param)
+    ccall((:ucp_worker_set_am_recv_handler, libucp), ucs_status_t, (ucp_worker_h, Ptr{ucp_am_handler_param_t}), worker, param)
+end
+
 function ucp_am_send_nb(ep, id, buffer, count, datatype, cb, flags)
     ccall((:ucp_am_send_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, UInt16, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_send_callback_t, UInt32), ep, id, buffer, count, datatype, cb, flags)
+end
+
+function ucp_am_send_nbx(ep, id, header, header_length, buffer, count, param)
+    ccall((:ucp_am_send_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, UInt32, Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Csize_t, Ptr{ucp_request_param_t}), ep, id, header, header_length, buffer, count, param)
+end
+
+function ucp_am_recv_data_nbx(worker, data_desc, buffer, count, param)
+    ccall((:ucp_am_recv_data_nbx, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Ptr{Cvoid}, Csize_t, Ptr{ucp_request_param_t}), worker, data_desc, buffer, count, param)
 end
 
 function ucp_am_data_release(worker, data)
@@ -252,6 +264,10 @@ end
 
 function ucp_tag_msg_recv_nb(worker, buffer, count, datatype, message, cb)
     ccall((:ucp_tag_msg_recv_nb, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_tag_message_h, ucp_tag_recv_callback_t), worker, buffer, count, datatype, message, cb)
+end
+
+function ucp_tag_msg_recv_nbx(worker, buffer, count, message, param)
+    ccall((:ucp_tag_msg_recv_nbx, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Csize_t, ucp_tag_message_h, Ptr{ucp_request_param_t}), worker, buffer, count, message, param)
 end
 
 function ucp_put_nbi(ep, buffer, length, remote_addr, rkey)
