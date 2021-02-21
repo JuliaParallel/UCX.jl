@@ -2,6 +2,7 @@ module UCX
 
 using Sockets: InetAddr, IPv4, listenany
 using Random
+import FunctionWrappers: FunctionWrapper
 
 include("api.jl")
 
@@ -162,7 +163,8 @@ mutable struct UCXContext
         # There is also AMO32 & AMO64 (atomic), RMA, and AM
         features     = API.UCP_FEATURE_TAG |
                        API.UCP_FEATURE_WAKEUP |
-                       API.UCP_FEATURE_STREAM
+                       API.UCP_FEATURE_STREAM |
+                       API.UCP_FEATURE_AM
 
         params = Ref{API.ucp_params}()
         memzero!(params)
@@ -212,6 +214,7 @@ mutable struct UCXWorker
     fd::RawFD
     context::UCXContext
     inflight::IdDict{Any, Nothing} # IdSet -- Can't use UCXRequest since that is defined after
+    am_handlers::Dict{UInt16, Any}
 
     function UCXWorker(context::UCXContext)
         field_mask  = API.UCP_WORKER_PARAM_FIELD_THREAD_MODE
@@ -231,7 +234,7 @@ mutable struct UCXWorker
         @check API.ucp_worker_get_efd(handle, r_fd)
         fd = Libc.RawFD(r_fd[])
 
-        worker = new(handle, fd, context, IdDict{Any,Nothing}())
+        worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}())
         finalizer(worker) do worker
             worker.fd = RawFD(-1)
             @assert isempty(worker.inflight)
@@ -260,11 +263,23 @@ end
 
 import FileWatching: poll_fd
 function Base.wait(worker::UCXWorker)
-    while true
+    # Approach 0: Timer
+    # Turns out to be very slow
+    # Approach 2: Busy loop
+    # Unfair scheduling :/
+    # while progress(worker) && isopen(worker)
+    #     yield()
+    # end
+    # Approach 3
+    # About 2x slower on small messages than busy
+    while isopen(worker)
         if progress(worker)
             # progress was made
+            yield()
             continue
         end
+
+        # Wait for poll
         status = API.ucp_worker_arm(worker)
         if status == API.UCS_OK
             if !isopen(worker)
@@ -296,6 +311,98 @@ function Base.close(worker::UCXWorker)
     notify(worker)
 end
 
+"""
+    AMHandler(func)
+
+## Arguments to callback
+  - `worker::UCXWorker`
+  - `data::Ptr{Cvoid}`
+  - `length::Csize_t`
+  - `reply_ep::API.ucp_ep_h`
+  - `flags::Cuint`
+
+## Return values
+The callback `func` needs to return either `UCX.API.UCS_OK` or `UCX.API.UCS_INPROGRESS`.
+If it returns `UCX.API.UCS_INPROGRESS` it **must** call `am_data_release(worker, data)`,
+or call `am_recv`.
+"""
+mutable struct AMHandler
+    func::FunctionWrapper{API.ucs_status_t, Tuple{UCXWorker, Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Csize_t, Ptr{API.ucp_am_recv_param_t}}}
+    worker::UCXWorker
+end
+
+function am_recv_callback(arg::Ptr{Cvoid}, header::Ptr{Cvoid}, header_length::Csize_t, data::Ptr{Cvoid}, length::Csize_t, param::Ptr{API.ucp_am_recv_param_t})::API.ucs_status_t
+    handler = Base.unsafe_pointer_to_objref(arg)::AMHandler
+    try
+        return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
+    catch err
+        showerror(stderr, err, catch_backtrace())
+        return API.UCS_OK
+    end
+end
+
+AMHandler(f, w::UCXWorker, id) = AMHandler(w, f, id)
+
+function AMHandler(worker::UCXWorker, func, id)
+    handler = AMHandler(func, worker)
+    worker.am_handlers[id] = handler # root handler in worker
+
+    arg = Base.pointer_from_objref(handler)
+    cb  = @cfunction(am_recv_callback, API.ucs_status_t, (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Csize_t, Ptr{API.ucp_am_recv_param_t}))
+
+    field_mask  = API.UCP_AM_HANDLER_PARAM_FIELD_ID |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_CB |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_ARG
+
+    params = Ref{API.ucp_am_handler_param_t}()
+    memzero!(params)
+    set!(params, :field_mask, field_mask)
+    set!(params, :id,         id)
+    set!(params, :cb,         cb)
+    set!(params, :arg,        arg)
+
+    @check API.ucp_worker_set_am_recv_handler(worker, params)
+end
+
+function delete_am!(worker::UCXWorker, id)
+    delete!(worker.am_handlers, id)
+
+    field_mask  = API.UCP_AM_HANDLER_PARAM_FIELD_ID |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_CB |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_ARG
+
+    params = Ref{API.ucp_am_handler_param_t}()
+    memzero!(params)
+    set!(params, :field_mask, field_mask)
+    set!(params, :id,         id)
+    set!(params, :cb,         C_NULL)
+    set!(params, :arg,        C_NULL)
+
+    @check API.ucp_worker_set_am_recv_handler(worker, params)
+end
+
+function am_data_release(worker::UCXWorker, data)
+    API.ucp_am_data_release(worker, data)
+end
+
+mutable struct UCXAddress
+    worker::UCXWorker
+    handle::Ptr{API.ucp_address_t}
+    len::Csize_t
+
+    function UCXAddress(worker::UCXWorker)
+        addr = Ref{Ptr{API.ucp_address_t}}()
+        len = Ref{Csize_t}()
+        @check API.ucp_worker_get_address(worker, addr, len)
+
+        this = new(worker, addr[], len[])
+        finalizer(this) do addr
+            API.ucp_worker_release_address(addr.worker, addr.handle)
+        end
+        return this
+    end
+end
+
 struct UCXConnectionRequest
     handle::API.ucp_conn_request_h
 end
@@ -305,6 +412,7 @@ mutable struct UCXEndpoint
     worker::UCXWorker
 
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
+        @assert handle != C_NULL
         endpoint = new(handle, worker)
         finalizer(endpoint) do endpoint
             # NOTE: Generally not safe to spin in finalizer
@@ -371,6 +479,35 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     # TODO: Error callback
 
     r_handle = Ref{API.ucp_ep_h}()
+    @check API.ucp_ep_create(worker, params, r_handle)
+
+    UCXEndpoint(worker, r_handle[])
+end
+
+function UCXEndpoint(worker::UCXWorker, addr::UCXAddress)
+    GC.@preserve addr begin
+        _UCXEndpoint(worker, addr.handle)
+    end
+end
+
+function UCXEndpoint(worker::UCXWorker, addr_buf::Vector{UInt8})
+    GC.@preserve addr_buf begin
+        addr = Base.unsafe_convert(Ptr{API.ucp_address_t}, pointer(addr_buf))
+        _UCXEndpoint(worker, addr)
+    end
+end
+
+function _UCXEndpoint(worker::UCXWorker, addr::Ptr{API.ucp_address_t})
+    field_mask = API.UCP_EP_PARAM_FIELD_REMOTE_ADDRESS
+
+    r_handle = Ref{API.ucp_ep_h}()
+    params = Ref{API.ucp_ep_params}()
+    memzero!(params)
+    set!(params, :field_mask,   field_mask)
+    set!(params, :address,      addr)
+
+    # TODO: Error callback
+
     @check API.ucp_ep_create(worker, params, r_handle)
 
     UCXEndpoint(worker, r_handle[])
@@ -447,7 +584,7 @@ end
 # don't create these manually
 mutable struct UCXRequest
     worker::UCXWorker
-    event::Base.Event # XXX: Do we need a full `Event` here or can we get away with an atomic bool
+    event::Base.Event
     status::API.ucs_status_t
     data::Any
     function UCXRequest(worker::UCXWorker, data)
@@ -483,15 +620,38 @@ end
 
 Base.notify(req::UCXRequest) = notify(req.event)
 function Base.wait(req::UCXRequest)
+    ## 1: Full suspend
     # Since we are using polling, we can't suspend fully
-    # e.g `wait(req.event)`, not ideal but better than a busy loop?
+    # wait(req.event)
+    # @check req.status
+
+    ## 2: Timer Based
+    # start a timer that regularly makes progress
+    # Turns out this makes `benchmarks/ucx` 5x slower
+    # progress(req.worker)
+    # timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
+    #     progress(req.worker)
+    # end
+    # @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
+    # wait(req.event)
+    # close(timer)
+    # @check req.status
+
+    ## 3: Busy loop
+    # - It can be that only due to us calling progress we will trigger
+    #   the Event.
     progress(req.worker)
-    timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
+    ev = req.event
+    while true
+        lock(ev.notify)
+        if ev.set
+            break
+        end
+        unlock(ev.notify)
+        yield()
         progress(req.worker)
     end
-    @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
-    wait(req.event)
-    close(timer)
+    unlock(ev.notify)
     @check req.status
 end
 
@@ -641,6 +801,49 @@ end
 ## Atomics
 
 ## AM
+
+function am_send(ep::UCXEndpoint, id, header, buffer=nothing)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+    request = UCXRequest(ep, (header, buffer)) # rooted through ep.worker
+    param = request_param(dt, request, cb)
+
+    GC.@preserve buffer header begin
+        if buffer === nothing
+            data   = C_NULL
+            nbytes = 0
+        else
+            data = Base.unsafe_convert(Ptr{Cvoid}, Base.cconvert(Ptr{Cvoid}, buffer))
+            nbytes = sizeof(buffer)
+        end
+        header_ptr = Base.unsafe_convert(Ptr{Cvoid}, Base.cconvert(Ptr{Cvoid}, header))
+
+        ptr = API.ucp_am_send_nbx(ep, id, header_ptr, sizeof(header), data, nbytes, param)
+    end
+    return handle_request(request, ptr)
+end
+
+function am_data_recv_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, length::Csize_t, user_data::Ptr{Cvoid})
+    @assert user_data !== C_NULL
+    request = UCXRequest(user_data)
+    request.status = status
+    notify(request)
+    API.ucp_request_free(req)
+    return nothing
+end
+
+function am_recv(worker::UCXWorker, data_desc, buffer, nbytes)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(am_data_recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Csize_t, Ptr{Cvoid}))
+    request = UCXRequest(worker, buffer) # rooted through ep.worker
+    param = request_param(dt, request, cb)
+
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        ptr  = API.ucp_am_recv_data_nbx(worker, data_desc, data, nbytes, param)
+    end
+    return handle_request(request, ptr)
+end
 
 ## Collectives
 
