@@ -12,6 +12,24 @@ using UCX
     @test ctx.config[:TLS] == "tcp"
 end
 
+@testset "progress" begin
+    using UCX
+    ctx = UCX.UCXContext()
+    worker = UCX.UCXWorker(ctx)
+
+    flag = Ref(false)
+    T = UCX.@async_showerr begin
+        wait(worker)
+        flag[] = true
+    end
+    while !flag[]
+        notify(worker)
+        yield()
+    end
+    wait(T)
+    @test flag[]
+end
+
 
 @testset "examples" begin
     examples_dir = joinpath(@__DIR__, "..", "examples")
