@@ -162,7 +162,8 @@ mutable struct UCXContext
         # There is also AMO32 & AMO64 (atomic), RMA, and AM
         features     = API.UCP_FEATURE_TAG |
                        API.UCP_FEATURE_WAKEUP |
-                       API.UCP_FEATURE_STREAM
+                       API.UCP_FEATURE_STREAM |
+                       API.UCP_FEATURE_AM
 
         params = Ref{API.ucp_params}()
         memzero!(params)
@@ -212,6 +213,7 @@ mutable struct UCXWorker
     fd::RawFD
     context::UCXContext
     inflight::IdDict{Any, Nothing} # IdSet -- Can't use UCXRequest since that is defined after
+    am_handlers::Dict{UInt16, Any}
 
     function UCXWorker(context::UCXContext)
         field_mask  = API.UCP_WORKER_PARAM_FIELD_THREAD_MODE
@@ -231,7 +233,7 @@ mutable struct UCXWorker
         @check API.ucp_worker_get_efd(handle, r_fd)
         fd = Libc.RawFD(r_fd[])
 
-        worker = new(handle, fd, context, IdDict{Any,Nothing}())
+        worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}())
         finalizer(worker) do worker
             worker.fd = RawFD(-1)
             @assert isempty(worker.inflight)
@@ -294,6 +296,96 @@ end
 function Base.close(worker::UCXWorker)
     worker.fd = RawFD(-1)
     notify(worker)
+end
+
+"""
+    AMHandler(func)
+
+## Arguments to callback
+  - `worker::UCXWorker`
+  - `data::Ptr{Cvoid}`
+  - `length::Csize_t`
+  - `reply_ep::API.ucp_ep_h`
+  - `flags::Cuint`
+
+## Return values
+The callback `func` needs to return either `UCX.API.UCS_OK` or `UCX.API.UCS_INPROGRESS`.
+If it returns `UCX.API.UCS_INPROGRESS` it **must** call `am_data_release(worker, data)`,
+or call `am_recv`.
+"""
+mutable struct AMHandler
+    func::Any
+    worker::UCXWorker
+end
+
+function am_recv_callback(arg::Ptr{Cvoid}, header::Ptr{Cvoid}, header_length::Csize_t, data::Ptr{Cvoid}, length::Csize_t, param::Ptr{API.ucp_am_recv_param_t})::API.ucs_status_t
+    handler = Base.unsafe_pointer_to_objref(arg)::AMHandler
+    return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
+end
+
+AMHandler(f, w::UCXWorker, id) = AMHandler(w, f, id)
+
+function AMHandler(worker::UCXWorker, func, id)
+    handler = AMHandler(func, worker) # XXX: Can we do this without a dynamic call or @cfunction($func)
+    worker.am_handlers[id] = handler # root handler in worker
+
+    arg = Base.pointer_from_objref(handler)
+    cb  = @cfunction(am_recv_callback, API.ucs_status_t, (Ptr{Cvoid}, Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Csize_t, Ptr{API.ucp_am_recv_param_t}))
+
+    field_mask  = API.UCP_AM_HANDLER_PARAM_FIELD_ID |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_CB |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_ARG |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_FLAGS
+
+    params = Ref{API.ucp_am_handler_param_t}()
+    memzero!(params)
+    set!(params, :field_mask, field_mask)
+    set!(params, :id,         id)
+    set!(params, :cb,         cb)
+    set!(params, :arg,        arg)
+    set!(params, :flags,      API.UCP_AM_FLAG_WHOLE_MSG)
+    # flags?
+
+    @check API.ucp_worker_set_am_recv_handler(worker, params)
+end
+
+function delete_am!(worker::UCXWorker, id)
+    delete!(worker.am_handlers, id)
+
+    field_mask  = API.UCP_AM_HANDLER_PARAM_FIELD_ID |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_CB |
+                  API.UCP_AM_HANDLER_PARAM_FIELD_ARG
+
+    params = Ref{API.ucp_am_handler_param_t}()
+    memzero!(params)
+    set!(params, :field_mask, field_mask)
+    set!(params, :id,         id)
+    set!(params, :cb,         C_NULL)
+    set!(params, :arg,        C_NULL)
+
+    @check API.ucp_worker_set_am_recv_handler(worker, params)
+end
+
+function am_data_release(worker::UCXWorker, data)
+    API.ucp_am_data_release(worker, data)
+end
+
+mutable struct UCXAddress
+    worker::UCXWorker
+    handle::Ptr{API.ucp_address_t}
+    len::Csize_t
+
+    function UCXAddress(worker::UCXWorker)
+        addr = Ref{Ptr{API.ucp_address_t}}()
+        len = Ref{Csize_t}()
+        @check API.ucp_worker_get_address(worker, addr, len)
+
+        this = new(worker, addr[], len[])
+        finalizer(this) do addr
+            API.ucp_worker_release_address(addr.worker, addr.handle)
+        end
+        return this
+    end
 end
 
 struct UCXConnectionRequest
@@ -371,6 +463,35 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     # TODO: Error callback
 
     r_handle = Ref{API.ucp_ep_h}()
+    @check API.ucp_ep_create(worker, params, r_handle)
+
+    UCXEndpoint(worker, r_handle[])
+end
+
+function UCXEndpoint(worker::UCXWorker, addr::UCXAddress)
+    GC.@preserve addr begin
+        _UCXEndpoint(worker, addr.handle)
+    end
+end
+
+function UCXEndpoint(worker::UCXWorker, addr_buf::Vector{UInt8})
+    GC.@preserve addr_buf begin
+        addr = Base.unsafe_convert(Ptr{API.ucp_address_t}, pointer(addr_buf))
+        _UCXEndpoint(worker, addr)
+    end
+end
+
+function _UCXEndpoint(worker::UCXWorker, addr::Ptr{API.ucp_address_t})
+    field_mask = API.UCP_EP_PARAM_FIELD_REMOTE_ADDRESS
+
+    r_handle = Ref{API.ucp_ep_h}()
+    params = Ref{API.ucp_ep_params}()
+    memzero!(params)
+    set!(params, :field_mask,   field_mask)
+    set!(params, :address,      addr)
+
+    # TODO: Error callback
+
     @check API.ucp_ep_create(worker, params, r_handle)
 
     UCXEndpoint(worker, r_handle[])
@@ -641,6 +762,49 @@ end
 ## Atomics
 
 ## AM
+
+function am_send(ep::UCXEndpoint, id, header, buffer=nothing)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+    request = UCXRequest(ep, (header, buffer)) # rooted through ep.worker
+    param = request_param(dt, request, cb)
+
+    GC.@preserve buffer header begin
+        if buffer === nothing
+            data   = C_NULL
+            nbytes = 0
+        else
+            data = Base.unsafe_convert(Ptr{Cvoid}, Base.cconvert(Ptr{Cvoid}, buffer))
+            nbytes = sizeof(buffer)
+        end
+        header_ptr = Base.unsafe_convert(Ptr{Cvoid}, Base.cconvert(Ptr{Cvoid}, header))
+
+        ptr = API.ucp_am_send_nbx(ep, id, header_ptr, sizeof(header), data, nbytes, param)
+    end
+    return handle_request(request, ptr)
+end
+
+function am_data_recv_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, length::Csize_t, user_data::Ptr{Cvoid})
+    @assert user_data !== C_NULL
+    request = UCXRequest(user_data)
+    request.status = status
+    notify(request)
+    API.ucp_request_free(req)
+    return nothing
+end
+
+function am_recv(worker::UCXWorker, data_desc, buffer, nbytes)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(am_data_recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Csize_t, Ptr{Cvoid}))
+    request = UCXRequest(worker, buffer) # rooted through ep.worker
+    param = request_param(dt, request, cb)
+
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        ptr  = API.ucp_am_recv_data_nbx(worker, data_desc, data, nbytes, param)
+    end
+    return handle_request(request, ptr)
+end
 
 ## Collectives
 

@@ -30,6 +30,12 @@ end
     @test flag[]
 end
 
+@testset "address" begin
+    ctx = UCX.UCXContext()
+    worker = UCX.UCXWorker(ctx)
+    addr = UCX.UCXAddress(worker)
+    @test addr.len > 0
+end
 
 @testset "examples" begin
     examples_dir = joinpath(@__DIR__, "..", "examples")
