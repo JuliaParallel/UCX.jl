@@ -993,4 +993,6 @@ function stream_recv(ep::Endpoint, args...)
     stream_recv(ep.ep, args...)
 end
 
+include("legacy.jl")
+
 end #module
