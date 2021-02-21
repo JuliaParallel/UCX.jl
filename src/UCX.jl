@@ -209,6 +209,7 @@ end
 
 mutable struct UCXWorker
     handle::API.ucp_worker_h
+    fd::RawFD
     context::UCXContext
     inflight::IdDict{Any, Nothing} # IdSet -- Can't use UCXRequest since that is defined after
 
@@ -223,9 +224,16 @@ mutable struct UCXWorker
 
         r_handle = Ref{API.ucp_worker_h}()
         @check API.ucp_worker_create(context, params, r_handle)
+        handle = r_handle[]
 
-        worker = new(r_handle[], context, IdDict{Any,Nothing}())
+        # Instead of Timer
+        r_fd = Ref{API.Cint}()
+        @check API.ucp_worker_get_efd(handle, r_fd)
+        fd = Libc.RawFD(r_fd[])
+
+        worker = new(handle, fd, context, IdDict{Any,Nothing}())
         finalizer(worker) do worker
+            worker.fd = RawFD(-1)
             @assert isempty(worker.inflight)
             API.ucp_worker_destroy(worker)
         end
@@ -234,8 +242,58 @@ mutable struct UCXWorker
 end
 Base.unsafe_convert(::Type{API.ucp_worker_h}, worker::UCXWorker) = worker.handle
 
+"""
+    progress(worker::UCXWorker)
+
+Allows `worker` to make progress, this includes finalizing requests
+and call callbacks.
+
+Returns `true` if progress was made, `false` if no work was waiting.
+"""
 function progress(worker::UCXWorker)
-    API.ucp_worker_progress(worker) !== 0
+    API.ucp_worker_progress(worker) != 0
+end
+
+function fence(worker::UCXWorker)
+    @check API.ucp_worker_fence(worker)
+end
+
+import FileWatching: poll_fd
+function Base.wait(worker::UCXWorker)
+    while true
+        if progress(worker)
+            # progress was made
+            continue
+        end
+        status = API.ucp_worker_arm(worker)
+        if status == API.UCS_OK
+            if !isopen(worker)
+                error("UCXWorker already closed")
+            end
+            # wait for events
+            poll_fd(worker.fd; writable=true, readable=true)
+            progress(worker)
+            break
+        elseif status == API.UCS_ERR_BUSY
+            # could not arm, need to progress more
+            continue
+        else
+            @check status
+        end
+    end
+end
+
+function Base.notify(worker::UCXWorker)
+    @check API.ucp_worker_signal(worker)
+end
+
+function Base.isopen(worker::UCXWorker)
+    worker.fd != RawFD(-1)
+end
+
+function Base.close(worker::UCXWorker)
+    worker.fd = RawFD(-1)
+    notify(worker)
 end
 
 struct UCXConnectionRequest
@@ -425,9 +483,15 @@ end
 
 Base.notify(req::UCXRequest) = notify(req.event)
 function Base.wait(req::UCXRequest)
-    # We rely on UvWorkerIdle on making progress
-    # so it is safe to suspend the task fully
+    # Since we are using polling, we can't suspend fully
+    # e.g `wait(req.event)`, not ideal but better than a busy loop?
+    progress(req.worker)
+    timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
+        progress(req.worker)
+    end
+    @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
     wait(req.event)
+    close(timer)
     @check req.status
 end
 
@@ -584,24 +648,15 @@ end
 
 mutable struct Worker
     worker::UCXWorker
-    timer::Base.Timer
     function Worker(ctx::UCXContext)
-        worker = UCXWorker(ctx)
-        timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
-            try
-                UCX.progress(worker)
-            catch err
-                showerror(stderr, err, catch_backtrace())
-                rethrow()
-            end
-        end
-        @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
-        return new(worker, timer)
+        new(UCXWorker(ctx))
     end
 end
 
-Base.wait(worker::Worker) = wait(worker.timer)
-Base.close(worker::Worker) = close(worker.timer)
+Base.isopen(worker::Worker) = isopen(worker.worker)
+Base.notify(worker::Worker) = notify(worker.worker)
+Base.wait(worker::Worker) = wait(worker.worker)
+Base.close(worker::Worker) = close(worker.worker)
 
 mutable struct Endpoint
     worker::Worker
