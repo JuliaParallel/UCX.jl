@@ -320,7 +320,12 @@ end
 
 function am_recv_callback(arg::Ptr{Cvoid}, header::Ptr{Cvoid}, header_length::Csize_t, data::Ptr{Cvoid}, length::Csize_t, param::Ptr{API.ucp_am_recv_param_t})::API.ucs_status_t
     handler = Base.unsafe_pointer_to_objref(arg)::AMHandler
-    return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
+    try
+        return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
+    catch err
+        showerror(stderr, err, catch_backtrace())
+        return API.UCS_OK
+    end
 end
 
 AMHandler(f, w::UCXWorker, id) = AMHandler(w, f, id)
