@@ -15,6 +15,30 @@ end
 @test UCX.Legacy.remotecall_fetch(()->true, 2)
 @test fetch(UCX.Legacy.remotecall(()->true, 2))
 
+
+@test UCX.Legacy.remotecall_fetch(()->true, 1)
+@test fetch(UCX.Legacy.remotecall(()->true, 1))
+
+# f() = for i in 1:1000
+#     UCX.Legacy.remotecall_wait(()->true, 2)
+# end
+
+# g() = for i in 1:1000
+#     remotecall_wait(()->true, 2)
+# end
+
+# @profview f()
+# @profview g()
+
+# @benchmark UCX.Legacy.remotecall(()->true, 2) #  2.502 μs
+# @benchmark remotecall(()->true, 2) # 11.502 μs
+
+# data = Array{UInt8}(undef, 8192)
+# @benchmark UCX.Legacy.remotecall((x)->true, 2, $data) # 2.767 μs
+# @benchmark remotecall((x)->true, 2, $data) # 17.380 μs
+
+# @benchmark UCX.Legacy.remote_do(()->true, 2) # 1.802 μs
+
 # f() = for i in 1:1000
 #     UCX.Legacy.remotecall_wait(()->true, 2)
 # end
