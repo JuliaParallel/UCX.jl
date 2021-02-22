@@ -112,7 +112,6 @@ end
         end
     else
         @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) != 0
-        @warn "Rendezvous protocol" length
         UCX.@async_showerr begin
             # Allocate rendezvous buffer
             # XXX: Support CuArray etc.
