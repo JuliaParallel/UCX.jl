@@ -26,12 +26,8 @@ import Distributed
 
 struct AMHeader
     from::Int
-    id::Int
     hdr::Distributed.MsgHeader
 end
-
-const COUNTER = Base.Threads.Atomic{Int}(0)
-const LAST_SEEN = Base.Threads.Atomic{Int}(-1)
 
 function handle_msg(msg::Distributed.CallMsg{:call}, header)
     Distributed.schedule_call(header.response_oid, ()->msg.f(msg.args...; msg.kwargs...))
@@ -77,11 +73,6 @@ end
     @assert header_length == sizeof(AMHeader)
     phdr = Base.unsafe_convert(Ptr{AMHeader}, header)
     am_hdr = Base.unsafe_load(phdr)
-
-    last_seen = Base.Threads.atomic_xchg!(LAST_SEEN, am_hdr.id)
-    if last_seen != am_hdr.id-1
-        @error "AM Handler called out of order" last_seen am_hdr
-    end
 
     param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
     if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
@@ -323,16 +314,11 @@ end
 # Distributed.remoteref_id(rr::UCXRemoteChannel) = Distributed.remoteref_id(rr.rc)
 # Base.eltype(::Type{UCXRemoteChannel{RC}}) where {RC} = eltype(RC)
 
-struct DelayedArg
-    rr::Distributed.Future
-end
-
 function remotecall(f, pid, args...; kwargs...)
-    id = Base.Threads.atomic_add!(COUNTER, 1)
     rr = Distributed.Future(pid)
 
     hdr = Distributed.MsgHeader(Distributed.remoteref_id(rr))
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), hdr)
     msg = Distributed.CallMsg{:call}(f, args, kwargs)
 
     req = send_msg(pid, header, msg, AM_REMOTECALL)
@@ -341,13 +327,12 @@ function remotecall(f, pid, args...; kwargs...)
 end
 
 function remotecall_fetch(f, pid, args...; kwargs...)
-    id = Base.Threads.atomic_add!(COUNTER, 1)
     oid = Distributed.RRID()
     rv = Distributed.lookup_ref(oid)
     rv.waitingfor = pid
 
     hdr = Distributed.MsgHeader(Distributed.RRID(0,0), oid)
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), hdr)
     msg = Distributed.CallMsg{:call_fetch}(f, args, kwargs)
 
     req = send_msg(pid, header, msg, AM_REMOTECALL_FETCH)
@@ -360,7 +345,6 @@ function remotecall_fetch(f, pid, args...; kwargs...)
 end
 
 function remotecall_wait(f, pid, args...; kwargs...)
-    id = Base.Threads.atomic_add!(COUNTER, 1)
     prid = Distributed.RRID()
     rv = Distributed.lookup_ref(prid)
     rv.waitingfor = pid
@@ -368,7 +352,7 @@ function remotecall_wait(f, pid, args...; kwargs...)
     ur = UCXFuture(rr)
 
     hdr = Distributed.MsgHeader(Distributed.remoteref_id(rr), prid)
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), hdr)
     msg = Distributed.CallWaitMsg(f, args, kwargs)
 
     req = send_msg(pid, header, msg, AM_REMOTECALL_WAIT)
@@ -382,9 +366,9 @@ function remotecall_wait(f, pid, args...; kwargs...)
 end
 
 function remote_do(f, pid, args...; kwargs...)
-    id = Base.Threads.atomic_add!(COUNTER, 1)
+
     hdr = Distributed.MsgHeader()
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), hdr)
 
     msg = Distributed.RemoteDoMsg(f, args, kwargs)
     send_msg(pid, header, msg, AM_REMOTE_DO)
@@ -393,8 +377,6 @@ function remote_do(f, pid, args...; kwargs...)
 end
 
 function deliver_result(msg, oid, value)
-    id = Base.Threads.atomic_add!(COUNTER, 1)
-
     if msg === :call_fetch || isa(value, Distributed.RemoteException)
         val = value
     else
@@ -402,7 +384,7 @@ function deliver_result(msg, oid, value)
     end
 
     hdr = Distributed.MsgHeader(oid)
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), hdr)
     _msg = Distributed.ResultMsg(val)
 
     send_msg(oid.whence, header, _msg, AM_RESULT)
