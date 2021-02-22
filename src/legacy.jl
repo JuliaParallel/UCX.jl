@@ -76,7 +76,7 @@ end
 
     param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
     if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
-        if false
+        if true
             ptr = Base.unsafe_convert(Ptr{UInt8}, data)
             buf = IOBuffer(Base.unsafe_wrap(Array, ptr, length))
 
@@ -112,6 +112,7 @@ end
         end
     else
         @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) != 0
+        @warn "Rendezvous protocol" length
         UCX.@async_showerr begin
             # Allocate rendezvous buffer
             # XXX: Support CuArray etc.
