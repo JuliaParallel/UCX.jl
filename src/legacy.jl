@@ -38,12 +38,15 @@ function handle_msg(msg::Distributed.CallMsg{:call_fetch}, header)
         v = Distributed.run_work_thunk(()->msg.f(msg.args...; msg.kwargs...), false)
         if isa(v, Distributed.SyncTake)
             try
-                deliver_result(:call_fetch, header.notify_oid, v)
+                req = deliver_result(:call_fetch, header.notify_oid, v)
             finally
                 unlock(v.rv.synctake)
             end
         else
-            deliver_result(:call_fetch, header.notify_oid, v)
+            req = deliver_result(:call_fetch, header.notify_oid, v)
+        end
+        if @isdefined(req)
+            wait(req)
         end
     end
 end
@@ -51,7 +54,8 @@ end
 function handle_msg(msg::Distributed.CallWaitMsg, header)
     UCX.@async_showerr begin
         rv = Distributed.schedule_call(header.response_oid, ()->msg.f(msg.args...; msg.kwargs...))
-        deliver_result(:call_wait, header.notify_oid, fetch(rv.c))
+        req = deliver_result(:call_wait, header.notify_oid, fetch(rv.c))
+        wait(req)
     end
 end
 
@@ -317,7 +321,8 @@ function remotecall(f, pid, args...; kwargs...)
     header = AMHeader(Distributed.myid(), hdr)
     msg = Distributed.CallMsg{:call}(f, args, kwargs)
 
-    send_msg(pid, header, msg, AM_REMOTECALL)
+    req = send_msg(pid, header, msg, AM_REMOTECALL)
+    # XXX: ensure that req is making progress
     UCXFuture(rr)
 end
 
@@ -367,6 +372,7 @@ function remote_do(f, pid, args...; kwargs...)
 
     msg = Distributed.RemoteDoMsg(f, args, kwargs)
     send_msg(pid, header, msg, AM_REMOTE_DO)
+    # XXX: ensure that req is making progress
     nothing
 end
 

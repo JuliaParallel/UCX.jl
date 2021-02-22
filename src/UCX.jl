@@ -602,17 +602,40 @@ end
     return request
 end
 
+const MAX_SPIN_BEFORE_YIELD = 10
+
 Base.notify(req::UCXRequest) = notify(req.event)
 function Base.wait(req::UCXRequest)
+    ## 1: Full suspend
     # Since we are using polling, we can't suspend fully
-    # e.g `wait(req.event)`, not ideal but better than a busy loop?
+    # wait(req.event)
+    # @check req.status
+
+    ## 2: Timer Based
+    # start a timer that regularly makes progress
+    # Turns out this makes `benchmarks/ucx` 5x slower
+    # progress(req.worker)
+    # timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
+    #     progress(req.worker)
+    # end
+    # @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
+    # wait(req.event)
+    # close(timer)
+    # @check req.status
+
+    ## 3: Busy loop
     progress(req.worker)
-    timer = Timer(0, interval=0.001) do t # 0.001 smallest interval
-        progress(req.worker)
+    while !req.event.set
+        spins = 0
+        while spins <= MAX_SPIN_BEFORE_YIELD
+            if progress(req.worker)
+                spins += 1
+            else
+                break
+            end
+        end
+        yield()
     end
-    @assert ccall(:uv_timer_get_repeat, UInt64, (Ptr{Cvoid},), timer) > 0
-    wait(req.event)
-    close(timer)
     @check req.status
 end
 
