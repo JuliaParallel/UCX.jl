@@ -76,7 +76,8 @@ end
 
     param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
     if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
-        if false
+        # For small messages do a synchronous receive
+        if length < 512
             ptr = Base.unsafe_convert(Ptr{UInt8}, data)
             buf = IOBuffer(Base.unsafe_wrap(Array, ptr, length))
 
@@ -91,12 +92,10 @@ end
             handle_msg(msg, am_hdr.hdr)
             return UCX.API.UCS_OK
         else
-            UCX.@async_showerr begin
+            UCX.@spawn_showerr begin
                 ptr = Base.unsafe_convert(Ptr{UInt8}, data)
                 buf = IOBuffer(Base.unsafe_wrap(Array, ptr, length))
 
-                # We could do this asynchronous
-                # Would need to return `IN_PROGRESS` and use UCX.am_data_release
                 msg = lock(proc_to_serializer(am_hdr.from)) do serializer
                     prev_io = serializer.io
                     serializer.io = buf
@@ -112,7 +111,7 @@ end
         end
     else
         @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) != 0
-        UCX.@async_showerr begin
+        UCX.@spawn_showerr begin
             # Allocate rendezvous buffer
             # XXX: Support CuArray etc.
             buffer = Array{UInt8}(undef, length)
