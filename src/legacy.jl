@@ -195,7 +195,7 @@ end
 
 struct UCXSerializer
     serializer::Distributed.ClusterSerializer{Base.GenericIOBuffer{Array{UInt8,1}}}
-    lock::Base.ReentrantLock
+    lock::Base.Threads.SpinLock
 end
 function Base.lock(f, ucx::UCXSerializer)
     lock(ucx.lock) do
@@ -237,23 +237,31 @@ function proc_to_serializer(p)
     this = get!(UCX_SERIALIZERS, p) do
         cs = Distributed.ClusterSerializer(IOBuffer())
         cs.pid = p
-        UCXSerializer(cs, Base.ReentrantLock())
+        UCXSerializer(cs, Base.Threads.SpinLock())
     end
 end
 
+@inline function send_msg(pid, hdr, msg, id)
+    # Short circuit self send
+    if pid == hdr.from
+        req = UCX.UCXRequest(UCX_WORKER, nothing)
+        UCX.unroot(req)
+        handle_msg(msg, hdr.hdr)
+        notify(req) 
+        req
+    else
+        ep = proc_to_endpoint(pid)
+        data = lock(proc_to_serializer(pid)) do serializer
+            Base.invokelatest(Distributed.serialize_msg, serializer, msg)
+            take!(serializer.io)
+        end
 
-function send_msg(pid, hdr, msg, id)
-    ep = proc_to_endpoint(pid)
-    data = lock(proc_to_serializer(pid)) do serializer
-        Base.invokelatest(Distributed.serialize_msg, serializer, msg)
-        take!(serializer.io)
+        header = Ref(hdr)
+
+        req = UCX.am_send(ep, id, header, data)
+        UCX.fence(ep.worker) # Gurantuee order
+        req
     end
-
-    header = Ref(hdr)
-
-    req = UCX.am_send(ep, id, header, data)
-    UCX.fence(ep.worker) # Gurantuee order
-    req
 end
 
 abstract type UCXRemoteRef <: Distributed.AbstractRemoteRef end
