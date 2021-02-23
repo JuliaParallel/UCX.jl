@@ -262,9 +262,19 @@ end
 
 import FileWatching: poll_fd
 function Base.wait(worker::UCXWorker)
-    while true
+    # Approach 0: Timer
+    # Turns out to be very slow
+    # Approach 2: Busy loop
+    # Unfair scheduling :/
+    # while progress(worker) && isopen(worker)
+    #     yield()
+    # end
+    # Approach 3
+    # About 2x slower on small messages than busy
+    while isopen(worker)
         if progress(worker)
             # progress was made
+            yield()
             continue
         end
         status = API.ucp_worker_arm(worker)
