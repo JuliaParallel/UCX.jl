@@ -6,6 +6,7 @@ using CSV
 
 dist_latency = Table(CSV.File("distributed/latency.csv"))
 legacy_latency = Table(CSV.File("legacy/latency_tcp.csv"))
+amarg_latency = Table(CSV.File("legacy/latency_amarg.csv"))
 ucx_latency = Table(CSV.File("ucx/latency_tcp.csv"))
 mpi_latency = Table(CSV.File("mpi/latency.csv"))
 
@@ -16,7 +17,8 @@ let
     fig.ylabel = "Latency (ns)"
 
     lines!(dist_latency.msg_size, dist_latency.latency, label = "Distributed", linewidth = 2, color=:red)
-    lines!(legacy_latency.msg_size, legacy_latency.latency, label = "Distributed over UCX", linewidth = 2, color=:blue)
+    lines!(legacy_latency.msg_size, legacy_latency.latency, label = "Distributed(UCX) -- Serialization", linewidth = 2, color=:blue)
+    lines!(amarg_latency.msg_size, amarg_latency.latency, label = "Distributed(UCX) -- AMArguments", linewidth = 2, color=:cyan)
     lines!(ucx_latency.msg_size, ucx_latency.latency, label = "UCX", linewidth = 2, color=:green)
     lines!(mpi_latency.msg_size, mpi_latency.latency, label = "MPI", linewidth = 2, color=:black)
 

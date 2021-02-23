@@ -29,13 +29,28 @@ struct AMHeader
     hdr::Distributed.MsgHeader
 end
 
+struct AMArg
+    rr::Distributed.RRID
+end
+
+function ensure_args(args)
+    map(args) do arg
+        if arg isa AMArg
+            Distributed.fetch_ref(arg.rr)
+        else
+            return arg
+        end
+    end
+end
+
 function handle_msg(msg::Distributed.CallMsg{:call}, header)
     Distributed.schedule_call(header.response_oid, ()->msg.f(msg.args...; msg.kwargs...))
 end
 
 function handle_msg(msg::Distributed.CallMsg{:call_fetch}, header)
     UCX.@async_showerr begin
-        v = Distributed.run_work_thunk(()->msg.f(msg.args...; msg.kwargs...), false)
+        args = ensure_args(msg.args)
+        v = Distributed.run_work_thunk(()->msg.f(args...; msg.kwargs...), false)
         if isa(v, Distributed.SyncTake)
             try
                 req = deliver_result(:call_fetch, header.notify_oid, v)
@@ -53,7 +68,8 @@ end
 
 function handle_msg(msg::Distributed.CallWaitMsg, header)
     UCX.@async_showerr begin
-        rv = Distributed.schedule_call(header.response_oid, ()->msg.f(msg.args...; msg.kwargs...))
+        args = ensure_args(msg.args)
+        rv = Distributed.schedule_call(header.response_oid, ()->msg.f(args...; msg.kwargs...))
         req = deliver_result(:call_wait, header.notify_oid, fetch(rv.c))
         wait(req)
     end
@@ -143,6 +159,63 @@ function am_result(worker, header, header_length, data, length, param)
     am_handler(Distributed.ResultMsg, worker, header, header_length, data, length, param)
 end
 
+struct AMArgHeader
+    from::Int
+    rr::Distributed.RRID
+    alloc::Any
+end
+
+function unsafe_copyto!(out, data)
+    ptr = Base.unsafe_convert(Ptr{eltype(out)}, data)
+    in  = Base.unsafe_wrap(typeof(out), ptr, size(out))
+    copyto!(out, in)
+end
+
+const AM_ARGUMENT = 6
+function am_argument(worker, header, header_length, data, length, _param)
+    # Very different from the other am endpoints. We send the type in the header
+    # instead of the actual data, so that we can allocate it on the output
+    buf = IOBuffer(Base.unsafe_wrap(Array, Base.unsafe_convert(Ptr{UInt8}, header), header_length))
+    from = read(buf, Int)
+    amarg = lock(proc_to_serializer(from)) do serializer
+        prev_io = serializer.io
+        serializer.io = buf
+        amarg = Distributed.deserialize(serializer)::AMArgHeader
+        serializer.io = prev_io 
+        amarg
+    end
+
+    param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
+    if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
+        # For small messages do a synchronous receive
+        if length < 512
+            out = amarg.alloc()
+            unsafe_copyto!(out, data)
+            put!(Distributed.lookup_ref(amarg.rr), out)
+            return UCX.API.UCS_OK
+        else
+            UCX.@spawn_showerr begin
+                out = amarg.alloc()
+                unsafe_copyto!(out, data)
+                put!(Distributed.lookup_ref(amarg.rr), out)
+                UCX.am_data_release(worker, data)
+            end
+            return UCX.API.UCS_INPROGRESS
+        end
+    else
+        @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) != 0
+        UCX.@spawn_showerr begin
+            # Allocate rendezvous buffer
+            out = amarg.alloc()
+            req = UCX.am_recv(worker, data, out, length)
+            wait(req)
+            # UCX.am_data_release not necessary due to am_recv
+            put!(Distributed.lookup_ref(amarg.rr), out)
+        end
+        return UCX.API.UCS_INPROGRESS
+    end
+end
+
 function start()
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
@@ -152,6 +225,7 @@ function start()
     UCX.AMHandler(worker, am_remotecall_wait,  AM_REMOTECALL_WAIT)
     UCX.AMHandler(worker, am_remote_do,        AM_REMOTE_DO)
     UCX.AMHandler(worker, am_result,           AM_RESULT)
+    UCX.AMHandler(worker, am_argument,         AM_ARGUMENT)
 
     global UCX_WORKER = worker
     atexit() do
@@ -247,6 +321,8 @@ end
     end
 end
 
+# TODO:
+# views
 @inline function send_arg(pid, arg::Array{T, N}) where {T, N}
     self = Distributed.myid()
     if self != pid && Base.isbitstype(T)
@@ -346,6 +422,7 @@ function remotecall_fetch(f, pid, args...; kwargs...)
 
     hdr = Distributed.MsgHeader(Distributed.RRID(0,0), oid)
     header = AMHeader(Distributed.myid(), hdr)
+    args = map((arg)->send_arg(pid, arg), args)
     msg = Distributed.CallMsg{:call_fetch}(f, args, kwargs)
 
     req = send_msg(pid, header, msg, AM_REMOTECALL_FETCH)
@@ -366,6 +443,7 @@ function remotecall_wait(f, pid, args...; kwargs...)
 
     hdr = Distributed.MsgHeader(Distributed.remoteref_id(rr), prid)
     header = AMHeader(Distributed.myid(), hdr)
+    args = map((arg)->send_arg(pid, arg), args)
     msg = Distributed.CallWaitMsg(f, args, kwargs)
 
     req = send_msg(pid, header, msg, AM_REMOTECALL_WAIT)
