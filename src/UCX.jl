@@ -308,6 +308,8 @@ function Base.close(worker::UCXWorker)
     notify(worker)
 end
 
+import FunctionWrappers: FunctionWrapper
+
 """
     AMHandler(func)
 
@@ -324,7 +326,7 @@ If it returns `UCX.API.UCS_INPROGRESS` it **must** call `am_data_release(worker,
 or call `am_recv`.
 """
 mutable struct AMHandler
-    func::Any
+    func::FunctionWrapper{API.ucs_status_t, Tuple{UCXWorker, Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Csize_t, Ptr{API.ucp_am_recv_param_t}}}
     worker::UCXWorker
 end
 
