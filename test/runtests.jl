@@ -81,4 +81,9 @@ end
             @test success(pipeline(`$cmd $script test $(2^i)`, stderr=stderr, stdout=stdout))
         end
     end
+
+    @testset "Distributed.jl over UCX" begin
+        script = joinpath(examples_dir, "distributed.jl")
+        @test success(pipeline(`$cmd $script`, stderr=stderr, stdout=stdout))
+    end
 end
