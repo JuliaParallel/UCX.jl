@@ -414,6 +414,7 @@ mutable struct UCXEndpoint
     worker::UCXWorker
 
     function UCXEndpoint(worker::UCXWorker, handle::API.ucp_ep_h)
+        @assert handle != C_NULL
         endpoint = new(handle, worker)
         finalizer(endpoint) do endpoint
             # NOTE: Generally not safe to spin in finalizer
