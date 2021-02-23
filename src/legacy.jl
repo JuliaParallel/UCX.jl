@@ -247,6 +247,29 @@ end
     end
 end
 
+@inline function send_arg(pid, arg::Array{T, N}) where {T, N}
+    self = Distributed.myid()
+    if self != pid && Base.isbitstype(T)
+        rr = Distributed.RRID()
+        shape = size(arg)
+        alloc = ()->Array{T,N}(undef, shape)
+        header = AMArgHeader(self, rr, alloc)
+
+        ep = proc_to_endpoint(pid)
+        raw_header = lock(proc_to_serializer(pid)) do serializer
+            write(serializer.io, Int(header.from)) # yes...
+            Base.invokelatest(Distributed.serialize, serializer, header)
+            take!(serializer.io)
+        end
+
+        UCX.am_send(ep, AM_ARGUMENT, raw_header, arg)
+        return AMArg(rr)
+    else
+        return arg
+    end
+end
+send_arg(pid, arg::Any) = arg
+
 abstract type UCXRemoteRef <: Distributed.AbstractRemoteRef end
 
 function Distributed.call_on_owner(f, rr::UCXRemoteRef, args...)
