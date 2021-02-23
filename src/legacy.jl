@@ -69,42 +69,36 @@ function handle_msg(msg::Distributed.ResultMsg, header)
     put!(Distributed.lookup_ref(header.response_oid), msg.value)
 end
 
+@inline function deserialize_msg(::Type{Msg}, from, data) where Msg
+    buf = IOBuffer(data)
+    msg = lock(proc_to_serializer(from)) do serializer
+        prev_io = serializer.io
+        serializer.io = buf
+        msg = Distributed.deserialize_msg(serializer)::Msg
+        serializer.io = prev_io 
+        msg
+    end
+end
+
 @inline function am_handler(::Type{Msg}, worker, header, header_length, data, length, _param) where Msg
     @assert header_length == sizeof(AMHeader)
     phdr = Base.unsafe_convert(Ptr{AMHeader}, header)
     am_hdr = Base.unsafe_load(phdr)
+    from = am_hdr.from
 
     param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
     if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
         # For small messages do a synchronous receive
         if length < 512
             ptr = Base.unsafe_convert(Ptr{UInt8}, data)
-            buf = IOBuffer(Base.unsafe_wrap(Array, ptr, length))
-
-            msg = lock(proc_to_serializer(am_hdr.from)) do serializer
-                prev_io = serializer.io
-                serializer.io = buf
-                msg = Distributed.deserialize_msg(serializer)::Msg
-                serializer.io = prev_io 
-                msg
-            end
-
+            msg = deserialize_msg(Msg, from, Base.unsafe_wrap(Array, ptr, length))::Msg
             handle_msg(msg, am_hdr.hdr)
             return UCX.API.UCS_OK
         else
             UCX.@spawn_showerr begin
                 ptr = Base.unsafe_convert(Ptr{UInt8}, data)
-                buf = IOBuffer(Base.unsafe_wrap(Array, ptr, length))
-
-                msg = lock(proc_to_serializer(am_hdr.from)) do serializer
-                    prev_io = serializer.io
-                    serializer.io = buf
-                    msg = Distributed.deserialize_msg(serializer)::Msg
-                    serializer.io = prev_io 
-                    msg
-                end
+                msg = deserialize_msg(Msg, from, Base.unsafe_wrap(Array, ptr, length))::Msg
                 UCX.am_data_release(worker, data)
-
                 handle_msg(msg, am_hdr.hdr)
             end
             return UCX.API.UCS_INPROGRESS
@@ -113,22 +107,11 @@ end
         @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) != 0
         UCX.@spawn_showerr begin
             # Allocate rendezvous buffer
-            # XXX: Support CuArray etc.
             buffer = Array{UInt8}(undef, length)
             req = UCX.am_recv(worker, data, buffer, length)
             wait(req)
             # UCX.am_data_release not necessary due to am_recv
-
-            buf = IOBuffer(buffer)
-            peer_id = am_hdr.from 
-            msg = lock(proc_to_serializer(am_hdr.from)) do serializer
-                prev_io = serializer.io
-                serializer.io = buf
-                msg = Base.invokelatest(Distributed.deserialize_msg, serializer)::Msg
-                serializer.io = prev_io 
-                msg
-            end
-
+            msg = deserialize_msg(Msg, from, buffer)::Msg
             handle_msg(msg, am_hdr.hdr)
         end
         return UCX.API.UCS_INPROGRESS
@@ -258,11 +241,34 @@ end
 
         header = Ref(hdr)
 
-        req = UCX.am_send(ep, id, header, data)
         UCX.fence(ep.worker) # Gurantuee order
+        req = UCX.am_send(ep, id, header, data)
         req
     end
 end
+
+@inline function send_arg(pid, arg::Array{T, N}) where {T, N}
+    self = Distributed.myid()
+    if self != pid && Base.isbitstype(T)
+        rr = Distributed.RRID()
+        shape = size(arg)
+        alloc = ()->Array{T,N}(undef, shape)
+        header = AMArgHeader(self, rr, alloc)
+
+        ep = proc_to_endpoint(pid)
+        raw_header = lock(proc_to_serializer(pid)) do serializer
+            write(serializer.io, Int(header.from)) # yes...
+            Base.invokelatest(Distributed.serialize, serializer, header)
+            take!(serializer.io)
+        end
+
+        UCX.am_send(ep, AM_ARGUMENT, raw_header, arg)
+        return AMArg(rr)
+    else
+        return arg
+    end
+end
+send_arg(pid, arg::Any) = arg
 
 abstract type UCXRemoteRef <: Distributed.AbstractRemoteRef end
 
