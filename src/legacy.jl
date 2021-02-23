@@ -298,13 +298,13 @@ function proc_to_serializer(p)
     end
 end
 
-@inline function send_msg(pid, hdr, msg, id)
+@inline function send_msg(pid, hdr, msg, id, notify=false)
     # Short circuit self send
     if pid == hdr.from
         req = UCX.UCXRequest(UCX_WORKER, nothing)
         UCX.unroot(req)
         handle_msg(msg, hdr.hdr)
-        notify(req) 
+        Base.notify(req)
         req
     else
         ep = proc_to_endpoint(pid)
@@ -317,6 +317,7 @@ end
 
         UCX.fence(ep.worker) # Gurantuee order
         req = UCX.am_send(ep, id, header, data)
+        notify && Base.notify(ep.worker)
         req
     end
 end
@@ -339,6 +340,7 @@ end
         end
 
         UCX.am_send(ep, AM_ARGUMENT, raw_header, arg)
+        notify(ep.worker) # wake worker up to make progress quicker
         return AMArg(rr)
     else
         return arg
@@ -410,8 +412,7 @@ function remotecall(f, pid, args...; kwargs...)
     header = AMHeader(Distributed.myid(), hdr)
     msg = Distributed.CallMsg{:call}(f, args, kwargs)
 
-    req = send_msg(pid, header, msg, AM_REMOTECALL)
-    # XXX: ensure that req is making progress
+    req = send_msg(pid, header, msg, AM_REMOTECALL, #=notify=# true)
     UCXFuture(rr)
 end
 
@@ -462,8 +463,7 @@ function remote_do(f, pid, args...; kwargs...)
     header = AMHeader(Distributed.myid(), hdr)
 
     msg = Distributed.RemoteDoMsg(f, args, kwargs)
-    send_msg(pid, header, msg, AM_REMOTE_DO)
-    # XXX: ensure that req is making progress
+    send_msg(pid, header, msg, AM_REMOTE_DO, #=notify=# true)
     nothing
 end
 
