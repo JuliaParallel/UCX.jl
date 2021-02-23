@@ -26,12 +26,12 @@ end
 
 function benchmark()
     t = Table(msg_size = Int[], latency = Float64[], kind=Symbol[])
+    send_buf = Vector{UInt8}(undef, MAX_MESSAGE_SIZE)
 
     size = 1
     while size <= MAX_MESSAGE_SIZE
         @info "sending" size
         flush(stderr)
-        send_buf = Vector{UInt8}(undef, size)
         touch_data(send_buf, size)
 
         if size > LARGE_MESSAGE_SIZE
@@ -48,7 +48,12 @@ function benchmark()
                 t_start = Base.time_ns()
             end
 
-            UCX.Legacy.remotecall_wait(target, 2, send_buf)
+            GC.@preserve send_buf begin
+                ptr = pointer(send_buf)
+                subset = Base.unsafe_wrap(Array, ptr, size)
+                # avoid view
+                UCX.Legacy.remotecall_wait(target, 2, subset)
+            end
 
         end
         t_end = Base.time_ns()
