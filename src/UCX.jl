@@ -802,11 +802,11 @@ end
 
 ## AM
 
-function am_send(ep::UCXEndpoint, id, header, buffer=nothing)
+function am_send(ep::UCXEndpoint, id, header, buffer=nothing, flags=nothing)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
     request = UCXRequest(ep, (header, buffer)) # rooted through ep.worker
-    param = request_param(dt, request, cb)
+    param = request_param(dt, request, cb, flags)
 
     GC.@preserve buffer header begin
         if buffer === nothing
