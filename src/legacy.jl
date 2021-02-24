@@ -36,7 +36,7 @@ end
 function ensure_args(args)
     map(args) do arg
         if arg isa AMArg
-            Distributed.fetch_ref(arg.rr)
+            Distributed.take_ref(arg.rr, Distributed.myid())
         else
             return arg
         end
