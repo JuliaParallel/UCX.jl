@@ -19,13 +19,14 @@ const AM_ANSWER = 2
 
 function am_receive(worker, header, header_length, data, length, _param)
     param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
-    @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FIELD_REPLY_EP) != 0
-    ep = UCX.UCXEndpoint(worker, param.reply_ep)
+    # @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FIELD_REPLY_EP) != 0
+    # ep = UCX.UCXEndpoint(worker, param.reply_ep)
 
     @assert header_length == sizeof(Int)
     id = Base.unsafe_load(Base.unsafe_convert(Ptr{Int}, header))
 
     UCX.@async_showerr begin
+        ep = proc_to_endpoint(1)
         header = Ref{Int}(id)
         req = UCX.am_send(ep, AM_ANSWER, header)
         wait(req)
@@ -112,7 +113,8 @@ function send()
     id = header[]
     time_start = Base.time_ns()
     UCX.fence(ep.worker)
-    req = UCX.am_send(ep, AM_RECEIVE, header, nothing, UCX.API.UCP_AM_SEND_FLAG_REPLY)
+    # req = UCX.am_send(ep, AM_RECEIVE, header, nothing, UCX.API.UCP_AM_SEND_FLAG_REPLY)
+    req = UCX.am_send(ep, AM_RECEIVE, header)
     wait(req)
     header[] += 1
     id, time_start 
