@@ -1,24 +1,33 @@
 using Distributed
-using ClusterManagers
+
 
 # Usage:
 # - Set `export JULIA_PROJECT=`pwd``
 
-if haskey(ENV, "SLURM_JOB_ID")
-  jobid = ENV["SLURM_JOB_ID"]  
-  ntasks = parse(Int, ENV["SLURM_NTASKS"])
-  cpus_per_task = parse(Int, ENV["SLURM_CPUS_PER_TASK"])
-  @info "Running on Slurm cluster" jobid ntasks cpus_per_task
-  manager = SlurmManager(ntasks)
-else
-  ntasks = 2
-  cpus_per_task = div(Sys.CPU_THREADS, ntasks)
-  @info "Running locally" ntasks
-  manager = Distributed.LocalManager(ntasks, false)
-end
-flush(stderr)
+# using ClusterManagers
+# if haskey(ENV, "SLURM_JOB_ID")
+#   jobid = ENV["SLURM_JOB_ID"]  
+#   ntasks = parse(Int, ENV["SLURM_NTASKS"])
+#   cpus_per_task = parse(Int, ENV["SLURM_CPUS_PER_TASK"])
+#   @info "Running on Slurm cluster" jobid ntasks cpus_per_task
+#   manager = SlurmManager(ntasks)
+# else
+#   ntasks = 2
+#   cpus_per_task = div(Sys.CPU_THREADS, ntasks)
+#   @info "Running locally" ntasks
+#   manager = Distributed.LocalManager(ntasks, false)
+# end
+# flush(stderr)
 
-addprocs(manager; exeflags = ["-t $cpus_per_task"])
+# addprocs(manager; exeflags = ["-t $cpus_per_task"])
+
+@info "Using PMI"
+using PMI
+
+include(joinpath(dirname(pathof(PMI)), "..", "examples", "distributed.jl"))
+WireUp.wireup()
+
+@everywhere ENV["CUDA_VISIBLE_DEVICES"] = myid()
 
 @everywhere begin
   import Dates

@@ -1,6 +1,3 @@
-@everywhere using UCX
-UCX.Legacy.wireup()
-
 @everywhere using CUDA
 
 include(joinpath(@__DIR__, "..", "config.jl"))
@@ -9,7 +6,6 @@ include(joinpath(@__DIR__, "..", "config.jl"))
     nothing
 end
 
-const MIN_MESSAGE_SIZE = 1
 const MAX_MESSAGE_SIZE = 1<<22
 # const MAX_MESSAGE_SIZE = 4096
 const LARGE_MESSAGE_SIZE = 8192
@@ -27,7 +23,7 @@ function benchmark()
     t = Table(msg_size = Int[], latency = Float64[], kind=Symbol[])
     send_buf = CuArray{UInt8, 1}(undef, MAX_MESSAGE_SIZE)
 
-    size = MIN_MESSAGE_SIZE
+    size = 1
     while size <= MAX_MESSAGE_SIZE
         @info "sending" size
         flush(stderr)
@@ -47,7 +43,7 @@ function benchmark()
                 t_start = Base.time_ns()
             end
 
-            UCX.Legacy.remotecall_wait(target, 2, view(send_buf, 1:size))
+            remotecall_wait(target, 2, view(send_buf, 1:size))
 
         end
         t_end = Base.time_ns()
