@@ -12,7 +12,7 @@ addprocs(1)
 
 @everywhere begin
 
-const times = Tuple{Int, UInt64}[]
+const times = Channel{Int}()
 
 const AM_RECEIVE = 1
 const AM_ANSWER = 2
@@ -37,7 +37,7 @@ end
 function am_answer(worker, header, header_length, data, length, param)
     @assert header_length == sizeof(Int)
     id = Base.unsafe_load(Base.unsafe_convert(Ptr{Int}, header))
-    push!(times, (id, Base.time_ns()))
+    UCX.@async_showerr put!(times, id)
     return UCX.API.UCS_OK
 end
 
@@ -53,7 +53,7 @@ function start()
         close(worker)
     end
 
-    @async begin
+    UCX.@spawn_showerr begin
         while isopen(worker)
             wait(worker)
         end
@@ -117,11 +117,14 @@ function send()
     req = UCX.am_send(ep, AM_RECEIVE, header)
     wait(req)
     header[] += 1
-    id, time_start 
+    oid = take!(times)
+    time_end = Base.time_ns()
+    @assert oid == id
+    time_end - time_start
 end
 
 function bench(n)
-    start_times = Tuple{Int, UInt64}[]
+    start_times = UInt64[]
     for i in 1:n
         push!(start_times, send())
     end
