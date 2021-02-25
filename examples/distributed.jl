@@ -15,3 +15,10 @@ UCX.Legacy.remotecall_wait(sum, 2, data)
 
 @test UCX.Legacy.remotecall_fetch(()->true, 1)
 @test fetch(UCX.Legacy.remotecall(()->true, 1))
+
+@everywhere using CUDA
+data = CuArray(data)
+
+@info "sending cuda"
+flush(stderr)
+@test UCX.Legacy.remotecall_fetch(sum, 2, data) == sum(data)

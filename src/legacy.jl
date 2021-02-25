@@ -165,12 +165,6 @@ struct AMArgHeader
     alloc::Any
 end
 
-function unsafe_copyto!(out, data)
-    ptr = Base.unsafe_convert(Ptr{eltype(out)}, data)
-    in  = Base.unsafe_wrap(typeof(out), ptr, size(out))
-    copyto!(out, in)
-end
-
 const AM_ARGUMENT = 6
 function am_argument(worker, header, header_length, data, length, _param)
     # Very different from the other am endpoints. We send the type in the header
@@ -190,13 +184,13 @@ function am_argument(worker, header, header_length, data, length, _param)
         # For small messages do a synchronous receive
         if length < 512
             out = amarg.alloc()
-            unsafe_copyto!(out, data)
+            UCX.unsafe_copyto!(out, data)
             put!(Distributed.lookup_ref(amarg.rr), out)
             return UCX.API.UCS_OK
         else
             UCX.@spawn_showerr begin
                 out = amarg.alloc()
-                unsafe_copyto!(out, data)
+                UCX.unsafe_copyto!(out, data)
                 put!(Distributed.lookup_ref(amarg.rr), out)
                 UCX.am_data_release(worker, data)
             end
@@ -281,6 +275,7 @@ function wireup(procs=Distributed.procs())
             end
         end
     end
+    @info "UCX Config" UCX_WORKER.context.config...
 end
 
 function proc_to_endpoint(p)
@@ -324,12 +319,21 @@ end
 
 # TODO:
 # views
-@inline function send_arg(pid, arg::Array{T, N}) where {T, N}
+function alloc_func(arg::Array{T, N}) where {T, N}
+    shape = size(arg)
+    () -> Array{T, N}(undef, shape)
+end
+
+function direct(::Array{T}) where T
+    return Base.isbitstype(T)
+end
+direct(::Any) = false
+
+@inline function send_arg(pid, arg)
     self = Distributed.myid()
-    if self != pid && Base.isbitstype(T)
+    if self != pid && direct(arg)
         rr = Distributed.RRID()
-        shape = size(arg)
-        alloc = ()->Array{T,N}(undef, shape)
+        alloc = alloc_func(arg) 
         header = AMArgHeader(self, rr, alloc)
 
         ep = proc_to_endpoint(pid)
@@ -346,7 +350,6 @@ end
         return arg
     end
 end
-send_arg(pid, arg::Any) = arg
 
 abstract type UCXRemoteRef <: Distributed.AbstractRemoteRef end
 

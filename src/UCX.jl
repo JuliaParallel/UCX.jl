@@ -3,6 +3,7 @@ module UCX
 using Sockets: InetAddr, IPv4, listenany
 using Random
 import FunctionWrappers: FunctionWrapper
+using Requires
 
 const PROGRESS_MODE = Ref(:idling)
 
@@ -21,6 +22,7 @@ function __init__()
     ccall((:ucs_debug_disable_signals, API.libucs), Cvoid, ())
 
     @assert version() >= VersionNumber(API.UCP_API_MAJOR, API.UCP_API_MINOR)
+
     mode = get(ENV, "JLUCX_PROGRESS_MODE", "idling")
     if mode == "busy"
         PROGRESS_MODE[] = :busy
@@ -32,7 +34,12 @@ function __init__()
         error("JLUCX_PROGRESS_MODE set to unkown progress mode: $mode")
     end
     @debug "UCX progress mode" mode
+
+    @require CUDA="052768ef-5323-5732-b1bb-66c8b64840ba" include("cuda.jl")
 end
+
+primitive type UCXPtr Sys.WORD_SIZE end
+include("buffer.jl")
 
 function memzero!(ref::Ref)
     ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), ref, 0, sizeof(ref))
@@ -749,13 +756,17 @@ function recv_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, info::Ptr{API.
     nothing
 end
 
-@inline function request_param(dt, request, cb, flags=nothing)
+@inline function request_param(dt, request, cb, flags=nothing, mem_type=nothing)
     attr_mask = API.UCP_OP_ATTR_FIELD_CALLBACK |
                 API.UCP_OP_ATTR_FIELD_USER_DATA |
                 API.UCP_OP_ATTR_FIELD_DATATYPE
 
     if flags !== nothing
         attr_mask |= API.UCP_OP_ATTR_FIELD_FLAGS
+    end
+
+    if mem_type !== nothing
+        attr_mask |= API.UCP_OP_ATTR_FIELD_MEMORY_TYPE
     end
 
     param = Ref{API.ucp_request_param_t}()
@@ -766,6 +777,9 @@ end
     set!(param, :user_data,    Base.pointer_from_objref(request))
     if flags !== nothing
         set!(param, :flags,    flags)
+    end
+    if mem_type !== nothing
+        set!(param, :memory_type, mem_type)
     end
 
     param
@@ -885,7 +899,7 @@ function am_send(ep::UCXEndpoint, id, header, buffer=nothing, flags=nothing)
             data   = C_NULL
             nbytes = 0
         else
-            data = Base.unsafe_convert(Ptr{Cvoid}, Base.cconvert(Ptr{Cvoid}, buffer))
+            data = reinterpret(Ptr{Cvoid}, Base.unsafe_convert(UCXPtr, Base.cconvert(UCXPtr, buffer)))
             nbytes = sizeof(buffer)
         end
         header_ptr = Base.unsafe_convert(Ptr{Cvoid}, Base.cconvert(Ptr{Cvoid}, header))
@@ -905,13 +919,14 @@ function am_data_recv_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, length
 end
 
 function am_recv(worker::UCXWorker, data_desc, buffer, nbytes)
+    request = UCXRequest(worker, buffer) # rooted through ep.worker
+    mem_type = memory_type(buffer)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(am_data_recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Csize_t, Ptr{Cvoid}))
-    request = UCXRequest(worker, buffer) # rooted through ep.worker
-    param = request_param(dt, request, cb)
+    param = request_param(dt, request, cb, #=flags=# nothing, mem_type)
 
     GC.@preserve buffer begin
-        data = pointer(buffer)
+        data = reinterpret(Ptr{Cvoid}, Base.unsafe_convert(UCXPtr, Base.cconvert(UCXPtr, buffer)))
         ptr  = API.ucp_am_recv_data_nbx(worker, data_desc, data, nbytes, param)
     end
     return handle_request(request, ptr)
