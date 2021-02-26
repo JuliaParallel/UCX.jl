@@ -57,4 +57,10 @@ end
             @test success(pipeline(`$cmd $script test $(2^i)`, stderr=stderr, stdout=stdout))
         end
     end
+
+    @testset "Active Messages" begin
+        setup  = joinpath(@__DIR__, "setup.jl")
+        script = joinpath(@__DIR__, "am.jl")
+        @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
+    end
 end
