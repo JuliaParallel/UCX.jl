@@ -1,5 +1,6 @@
 module API
-    using UCX_jll
+    include(joinpath(@__DIR__, "..", "deps", "deps.jl"))
+    
     using CEnum
     include(joinpath("api", "ctypes.jl"))
 
