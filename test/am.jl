@@ -30,7 +30,7 @@ const AM_ANSWER = 2
 function am_answer(worker, header, header_length, data, length, param)
     @assert header_length == sizeof(Int)
     id = Base.unsafe_load(Base.unsafe_convert(Ptr{Int}, header))
-    UCX.@async_showerr put!(reply_ch, id) # XXX: Is the task here necessary?
+    UCX.@async_showerr put!(reply_ch, id)
     return UCX.API.UCS_OK
 end
 UCX.AMHandler(UCX_WORKER, am_answer,  AM_ANSWER)
