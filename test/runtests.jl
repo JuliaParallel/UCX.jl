@@ -56,6 +56,9 @@ end
     withenv("JLUCX_PROGRESS_MODE" => "unknown") do
         @test !success(pipeline(`$cmd -L setup.jl $script`, stderr=Base.DevNull(), stdout=Base.DevNull()))
     end
+    withenv("AM_TEST_REPLY_EP" => "true") do
+        @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
+    end
 end
 
 @testset "examples" begin
