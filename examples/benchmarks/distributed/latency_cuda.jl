@@ -1,5 +1,4 @@
-@everywhere using UCX
-UCX.Legacy.wireup()
+@everywhere using CUDA
 
 include(joinpath(@__DIR__, "..", "config.jl"))
 
@@ -22,7 +21,7 @@ end
 
 function benchmark()
     t = Table(msg_size = Int[], latency = Float64[], kind=Symbol[])
-    send_buf = Vector{UInt8}(undef, MAX_MESSAGE_SIZE)
+    send_buf = CuArray{UInt8, 1}(undef, MAX_MESSAGE_SIZE)
 
     size = 1
     while size <= MAX_MESSAGE_SIZE
@@ -44,12 +43,7 @@ function benchmark()
                 t_start = Base.time_ns()
             end
 
-            GC.@preserve send_buf begin
-                ptr = pointer(send_buf)
-                subset = Base.unsafe_wrap(Array, ptr, size)
-                # avoid view
-                UCX.Legacy.remotecall_wait(target, 2, subset)
-            end
+            remotecall_wait(target, 2, view(send_buf, 1:size))
 
         end
         t_end = Base.time_ns()
@@ -62,12 +56,7 @@ function benchmark()
         size *= 2 
     end
 
-    if length(ARGS) > 0
-        suffix = string("_", ARGS[1])
-    else
-        suffix = ""
-    end
-    CSV.write(joinpath(@__DIR__, "latency$suffix.csv"), t)
+    CSV.write(joinpath(@__DIR__, "latency_cuda.csv"), t)
 end
 
 if !isinteractive()

@@ -2,8 +2,6 @@ using Distributed
 
 include(joinpath(@__DIR__, "..", "config.jl"))
 
-addprocs(1)
-
 @everywhere function target(A)
     nothing
 end
@@ -42,7 +40,12 @@ function benchmark()
                 t_start = Base.time_ns()
             end
 
-            remotecall_wait(target, 2, view(send_buf, 1:size))
+            GC.@preserve send_buf begin
+                ptr = pointer(send_buf)
+                subset = Base.unsafe_wrap(Array, ptr, size)
+                # avoid view
+                remotecall_wait(target, 2, subset)
+            end
         end
         t_end = Base.time_ns()
 
