@@ -48,7 +48,7 @@ end
     @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
     withenv("JLUCX_PROGRESS_MODE" => "busy") do
         @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
-        @test success(pipeline(`$cmd -t 2 -L setup.jl $script`, stderr=stderr, stdout=stdout))
+        # @test success(pipeline(`$cmd -t 2 -L setup.jl $script`, stderr=stderr, stdout=stdout))
     end
     withenv("JLUCX_PROGRESS_MODE" => "polling") do
         @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
