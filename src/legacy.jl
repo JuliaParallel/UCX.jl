@@ -90,7 +90,7 @@ end
     msg = lock(proc_to_serializer(from)) do serializer
         prev_io = serializer.io
         serializer.io = buf
-        msg = Distributed.deserialize_msg(serializer)::Msg
+        msg = Base.invokelatest(Distributed.deserialize_msg, serializer)::Msg
         serializer.io = prev_io 
         msg
     end
