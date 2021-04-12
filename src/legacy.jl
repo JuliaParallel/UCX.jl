@@ -87,7 +87,7 @@ end
 
 @inline function deserialize_msg(::Type{Msg}, from, data) where Msg
     buf = IOBuffer(data)
-    msg = lock(proc_to_serializer(from)) do serializer
+    msg = lock(proc_to_serializer_recv(from)) do serializer
         prev_io = serializer.io
         serializer.io = buf
         msg = Base.invokelatest(Distributed.deserialize_msg, serializer)::Msg
@@ -177,7 +177,7 @@ function am_argument(worker, header, header_length, data, length, _param)
     # instead of the actual data, so that we can allocate it on the output
     buf = IOBuffer(Base.unsafe_wrap(Array, Base.unsafe_convert(Ptr{UInt8}, header), header_length))
     from = read(buf, Int)
-    amarg = lock(proc_to_serializer(from)) do serializer
+    amarg = lock(proc_to_serializer_recv(from)) do serializer
         prev_io = serializer.io
         serializer.io = buf
         amarg = Distributed.deserialize(serializer)::AMArgHeader
@@ -262,7 +262,8 @@ end
 
 const UCX_PROC_ENDPOINT = Dict{Int, UCX.UCXEndpoint}()
 const UCX_ADDR_LISTING  = Dict{Int, Vector{UInt8}}()
-const UCX_SERIALIZERS = Dict{Int, UCXSerializer}()
+const UCX_SERIALIZERS_SEND = Dict{Int, UCXSerializer}()
+const UCX_SERIALIZERS_RECV = Dict{Int, UCXSerializer}()
 
 function wireup(procs=Distributed.procs())
     # Ideally we would use FluxRM or PMI and use their
@@ -290,8 +291,16 @@ function proc_to_endpoint(p)
     end
 end
 
-function proc_to_serializer(p)
-    this = get!(UCX_SERIALIZERS, p) do
+function proc_to_serializer_send(p)
+    this = get!(UCX_SERIALIZERS_SEND, p) do
+        cs = Distributed.ClusterSerializer(IOBuffer())
+        cs.pid = p
+        UCXSerializer(cs, Base.Threads.SpinLock())
+    end
+end
+
+function proc_to_serializer_recv(p)
+    this = get!(UCX_SERIALIZERS_RECV, p) do
         cs = Distributed.ClusterSerializer(IOBuffer())
         cs.pid = p
         UCXSerializer(cs, Base.Threads.SpinLock())
@@ -308,7 +317,7 @@ end
         req
     else
         ep = proc_to_endpoint(pid)
-        data = lock(proc_to_serializer(pid)) do serializer
+        data = lock(proc_to_serializer_send(pid)) do serializer
             Base.invokelatest(Distributed.serialize_msg, serializer, msg)
             take!(serializer.io)
         end
@@ -333,7 +342,7 @@ end
         header = AMArgHeader(self, rr, alloc)
 
         ep = proc_to_endpoint(pid)
-        raw_header = lock(proc_to_serializer(pid)) do serializer
+        raw_header = lock(proc_to_serializer_send(pid)) do serializer
             write(serializer.io, Int(header.from)) # yes...
             Base.invokelatest(Distributed.serialize, serializer, header)
             take!(serializer.io)
