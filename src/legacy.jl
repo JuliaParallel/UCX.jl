@@ -339,6 +339,7 @@ end
             take!(serializer.io)
         end
 
+        UCX.fence(ep.worker) # Gurantuee order
         UCX.am_send(ep, AM_ARGUMENT, raw_header, arg)
         notify(ep.worker) # wake worker up to make progress quicker
         return AMArg(rr)
