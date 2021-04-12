@@ -288,14 +288,16 @@ and call callbacks.
 
 Returns `true` if progress was made, `false` if no work was waiting.
 """
-function progress(worker::UCXWorker)
+function progress(worker::UCXWorker, allow_yield=true)
     tid = Base.Threads.threadid()
     if worker.in_amhandler[tid]
         @debug """
         UCXWorker is processing a Active Message on this thread
         Calling `progress` is not permitted and leads to recursion.
         """ tid exception=(UCXException(API.UCS_ERR_NO_PROGRESS), catch_backtrace())
-        yield()
+        if allow_yield
+            yield()
+        end
         return false
     else
         return API.ucp_worker_progress(worker) != 0

@@ -1,7 +1,7 @@
 function idle_callback(handle)
     idle = @Base.handle_as handle UvWorkerIdle
     if isopen(idle.worker)
-        progress(idle.worker)
+        progress(idle.worker, #=yield=#false)
     else
         close(idle)
     end
