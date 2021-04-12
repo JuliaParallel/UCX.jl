@@ -82,7 +82,8 @@ function handle_msg(msg::Distributed.RemoteDoMsg, header)
 end
 
 function handle_msg(msg::Distributed.ResultMsg, header)
-    put!(Distributed.lookup_ref(header.response_oid), msg.value)
+    value, = ensure_args((msg.value,))
+    put!(Distributed.lookup_ref(header.response_oid), value)
 end
 
 @inline function deserialize_msg(::Type{Msg}, from, data) where Msg
@@ -483,6 +484,8 @@ function deliver_result(msg, oid, value)
     else
         val = :OK
     end
+
+    val = send_arg(oid.whence, val)
 
     hdr = Distributed.MsgHeader(oid)
     header = AMHeader(Distributed.myid(), hdr)
