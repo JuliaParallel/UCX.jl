@@ -562,7 +562,7 @@ function deliver_result(msg, oid, value)
 
     val = send_arg(oid.whence, val)
 
-    reorder = proc_to_reorder_send(pid)
+    reorder = proc_to_reorder_send(oid.whence)
     id = next_id!(reorder)
     # WHAT ABOUT YIELDS FROM NOW ON...
 
