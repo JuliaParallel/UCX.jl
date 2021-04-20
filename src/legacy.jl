@@ -211,7 +211,7 @@ function am_argument(worker, header, header_length, data, length, _param)
     # instead of the actual data, so that we can allocate it on the output
     buf = IOBuffer(Base.unsafe_wrap(Array, Base.unsafe_convert(Ptr{UInt8}, header), header_length))
     from = read(buf, Int)
-    id = read(buf, Int)
+    id = read(buf, UInt)
 
     reorder = proc_to_reorder_recv(from)
     if !(can_process!(reorder, id))
