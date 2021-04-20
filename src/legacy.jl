@@ -26,11 +26,30 @@ import Distributed
 
 struct AMHeader
     from::Int
+    id::UInt
     hdr::Distributed.MsgHeader
 end
 
 struct AMArg
     rr::Distributed.RRID
+end
+
+
+struct ReorderQueue
+    current::Base.Threads.Atomic{UInt}
+    # TODO: Queue
+    ReorderQueue(val) = new(Base.Threads.Atomic{UInt}(val))
+end
+
+function can_process!(queue::ReorderQueue, id::UInt)
+    prior    = id-UInt(1)
+    previous = Base.Threads.atomic_cas!(queue.current[], prior, id)
+    return prio == previous
+end
+
+function next_id!(queue::ReorderQueue)
+    id = Base.Threads.atomic_add!(queue.current[], UInt(1))
+    return id
 end
 
 function ensure_args(args)
@@ -102,21 +121,29 @@ end
     phdr = Base.unsafe_convert(Ptr{AMHeader}, header)
     am_hdr = Base.unsafe_load(phdr)
     from = am_hdr.from
+    id = am_hdr.id
+
+    reorder = proc_to_reorder_recv(from)
 
     param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
     if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
-        # For small messages do a synchronous receive
-        if length < 512
+        # For small messages do a synchronous receive, if they can be processed immediatly
+        if length < 512 && can_process!(reorder, id)
             ptr = Base.unsafe_convert(Ptr{UInt8}, data)
             msg = deserialize_msg(Msg, from, Base.unsafe_wrap(Array, ptr, length))::Msg
             handle_msg(msg, am_hdr.hdr)
             return UCX.API.UCS_OK
         else
             UCX.@spawn_showerr begin
-                ptr = Base.unsafe_convert(Ptr{UInt8}, data)
-                msg = deserialize_msg(Msg, from, Base.unsafe_wrap(Array, ptr, length))::Msg
-                UCX.am_data_release(worker, data)
-                handle_msg(msg, am_hdr.hdr)
+                if can_process!(reorder, id)
+                    ptr = Base.unsafe_convert(Ptr{UInt8}, data)
+                    msg = deserialize_msg(Msg, from, Base.unsafe_wrap(Array, ptr, length))::Msg
+                    UCX.am_data_release(worker, data)
+                    handle_msg(msg, am_hdr.hdr)
+                else
+                    UCX.am_data_release(worker, data)
+                    error("AM Message received out-of-order")
+                end
             end
             return UCX.API.UCS_INPROGRESS
         end
@@ -128,8 +155,13 @@ end
             req = UCX.am_recv(worker, data, buffer, length)
             wait(req)
             # UCX.am_data_release not necessary due to am_recv
-            msg = deserialize_msg(Msg, from, buffer)::Msg
-            handle_msg(msg, am_hdr.hdr)
+
+            if can_process!(reorder, id)
+                msg = deserialize_msg(Msg, from, buffer)::Msg
+                handle_msg(msg, am_hdr.hdr)
+            else
+                error("AM Message received out-of-order")
+            end
         end
         return UCX.API.UCS_INPROGRESS
     end
@@ -174,10 +206,18 @@ end
 
 const AM_ARGUMENT = 6
 function am_argument(worker, header, header_length, data, length, _param)
+
     # Very different from the other am endpoints. We send the type in the header
     # instead of the actual data, so that we can allocate it on the output
     buf = IOBuffer(Base.unsafe_wrap(Array, Base.unsafe_convert(Ptr{UInt8}, header), header_length))
     from = read(buf, Int)
+    id = read(buf, Int)
+
+    reorder = proc_to_reorder_recv(from)
+    if !(can_process!(reorder, id))
+        error("AM Arg message receive out-of-order")
+    end
+
     amarg = lock(proc_to_serializer_recv(from)) do serializer
         prev_io = serializer.io
         serializer.io = buf
@@ -265,6 +305,9 @@ const UCX_PROC_ENDPOINT = Dict{Int, UCX.UCXEndpoint}()
 const UCX_ADDR_LISTING  = Dict{Int, Vector{UInt8}}()
 const UCX_SERIALIZERS_SEND = Dict{Int, UCXSerializer}()
 const UCX_SERIALIZERS_RECV = Dict{Int, UCXSerializer}()
+const UCX_REORDER_SEND = Dict{Int, ReorderQueue}()
+const UCX_REORDER_RECV = Dict{Int, ReorderQueue}()
+
 
 function wireup(procs=Distributed.procs())
     # Ideally we would use FluxRM or PMI and use their
@@ -308,6 +351,18 @@ function proc_to_serializer_recv(p)
     end
 end
 
+function proc_to_reorder_send(p)
+    this = get!(UCX_REORDER_SEND, p) do
+        ReorderQueue(UInt(1)) # send starts at 1 -- e.g. the next counter to send
+    end
+end
+
+function proc_to_reorder_recv(p)
+    this = get!(UCX_REORDER_RECV, p) do
+        ReorderQueue(UInt(0)) # recv starts at 0 -- meaning no message received yet
+    end
+end
+
 @inline function send_msg(pid, hdr, msg, id, notify=false)
     # Short circuit self send
     if pid == hdr.from
@@ -342,9 +397,14 @@ end
         alloc = ()->Array{T,N}(undef, shape)
         header = AMArgHeader(self, rr, alloc)
 
+        reorder = proc_to_reorder_send(pid)
+        id = next_id!(reorder)
+        # WHAT ABOUT YIELDS FROM NOW ON...
+
         ep = proc_to_endpoint(pid)
         raw_header = lock(proc_to_serializer_send(pid)) do serializer
             write(serializer.io, Int(header.from)) # yes...
+            write(serializer.io, UInt(id)) # yes...
             Base.invokelatest(Distributed.serialize, serializer, header)
             take!(serializer.io)
         end
@@ -419,8 +479,12 @@ end
 function remotecall(f, pid, args...; kwargs...)
     rr = Distributed.Future(pid)
 
+    reorder = proc_to_reorder_send(pid)
+    id = next_id!(reorder)
+    # WHAT ABOUT YIELDS FROM NOW ON...
+
     hdr = Distributed.MsgHeader(Distributed.remoteref_id(rr))
-    header = AMHeader(Distributed.myid(), hdr)
+    header = AMHeader(Distributed.myid(), id, hdr)
     msg = Distributed.CallMsg{:call}(f, args, kwargs)
 
     req = send_msg(pid, header, msg, AM_REMOTECALL, #=notify=# true)
@@ -432,8 +496,12 @@ function remotecall_fetch(f, pid, args...; kwargs...)
     rv = Distributed.lookup_ref(oid)
     rv.waitingfor = pid
 
+    reorder = proc_to_reorder_send(pid)
+    id = next_id!(reorder)
+    # WHAT ABOUT YIELDS FROM NOW ON...
+
     hdr = Distributed.MsgHeader(Distributed.RRID(0,0), oid)
-    header = AMHeader(Distributed.myid(), hdr)
+    header = AMHeader(Distributed.myid(), id, hdr)
     args = map((arg)->send_arg(pid, arg), args)
     msg = Distributed.CallMsg{:call_fetch}(f, args, kwargs)
 
@@ -453,8 +521,12 @@ function remotecall_wait(f, pid, args...; kwargs...)
     rr = Distributed.Future(pid)
     ur = UCXFuture(rr)
 
+    reorder = proc_to_reorder_send(pid)
+    id = next_id!(reorder)
+    # WHAT ABOUT YIELDS FROM NOW ON...
+
     hdr = Distributed.MsgHeader(Distributed.remoteref_id(rr), prid)
-    header = AMHeader(Distributed.myid(), hdr)
+    header = AMHeader(Distributed.myid(), id, hdr)
     args = map((arg)->send_arg(pid, arg), args)
     msg = Distributed.CallWaitMsg(f, args, kwargs)
 
@@ -469,9 +541,12 @@ function remotecall_wait(f, pid, args...; kwargs...)
 end
 
 function remote_do(f, pid, args...; kwargs...)
+    reorder = proc_to_reorder_send(pid)
+    id = next_id!(reorder)
+    # WHAT ABOUT YIELDS FROM NOW ON...
 
     hdr = Distributed.MsgHeader()
-    header = AMHeader(Distributed.myid(), hdr)
+    header = AMHeader(Distributed.myid(), id, hdr)
 
     msg = Distributed.RemoteDoMsg(f, args, kwargs)
     send_msg(pid, header, msg, AM_REMOTE_DO, #=notify=# true)
@@ -487,8 +562,12 @@ function deliver_result(msg, oid, value)
 
     val = send_arg(oid.whence, val)
 
+    reorder = proc_to_reorder_send(pid)
+    id = next_id!(reorder)
+    # WHAT ABOUT YIELDS FROM NOW ON...
+
     hdr = Distributed.MsgHeader(oid)
-    header = AMHeader(Distributed.myid(), hdr)
+    header = AMHeader(Distributed.myid(), id, hdr)
     _msg = Distributed.ResultMsg(val)
 
     send_msg(oid.whence, header, _msg, AM_RESULT)
