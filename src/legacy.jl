@@ -44,7 +44,7 @@ end
 function can_process!(queue::ReorderQueue, id::UInt)
     prior    = id-UInt(1)
     previous = Base.Threads.atomic_cas!(queue.current, prior, id)
-    return prio == previous
+    return prior == previous
 end
 
 function next_id!(queue::ReorderQueue)
