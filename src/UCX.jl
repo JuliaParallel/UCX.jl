@@ -417,7 +417,8 @@ function am_recv_callback(arg::Ptr{Cvoid}, header::Ptr{Cvoid}, header_length::Cs
         lock_am(handler.worker)
         return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
     catch err
-        showerror(stderr, err, catch_backtrace())
+        bt = catch_backtrace()
+        @async showerror(stderr, err, bt)
         return API.UCS_OK
     finally
         unlock_am(handler.worker)
