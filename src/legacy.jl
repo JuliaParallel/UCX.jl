@@ -24,6 +24,8 @@ md"""
 import ..UCX
 import Distributed
 
+using DataStructures
+
 struct AMHeader
     from::Int
     id::UInt
@@ -34,11 +36,36 @@ struct AMArg
     rr::Distributed.RRID
 end
 
+struct DelayedMsg
+    worker::UCX.UCXWorker
+    from::Int
+    data::Ptr{Cvoid}
+    length::Int
+    hdr::Distributed.MsgHeader
+    release::Bool
+end
+
+struct DelayedArg
+    worker::UCX.UCXWorker
+    from::Int
+    msgbuf::IOBuffer
+    data::Ptr{Cvoid}
+    length::Int
+    param::UCX.API.ucp_am_recv_param_t
+end
+
+const Delayed = Union{DelayedMsg, DelayedArg}
 
 struct ReorderQueue
     current::Base.Threads.Atomic{UInt}
-    # TODO: Queue
-    ReorderQueue(val) = new(Base.Threads.Atomic{UInt}(val))
+    queue::PriorityQueue{Delayed, UInt}
+    lock::Base.Threads.SpinLock
+
+    ReorderQueue(val) = new(
+        Base.Threads.Atomic{UInt}(val),
+        PriorityQueue{Delayed, UInt}(),
+        Base.Threads.SpinLock()
+        )
 end
 
 function can_process!(queue::ReorderQueue, id::UInt)
@@ -50,6 +77,35 @@ end
 function next_id!(queue::ReorderQueue)
     id = Base.Threads.atomic_add!(queue.current, UInt(1))
     return id
+end
+
+function DataStructures.enqueue!(queue::ReorderQueue, data, id::UInt)
+    lock(queue.lock)
+    if can_process!(queue, id)
+        # in between our previous check and this we made progress
+        unlock(queue.lock)
+        process(data)
+    end
+    enqueue!(queue.queue, data, id)
+    unlock(queue.lock)
+end
+
+function drain!(queue::ReorderQueue)
+    while true
+        lock(queue.lock)
+        if !isempty(queue.queue)
+            _, id = peek(queue.queue)
+            if can_process!(queue, id)
+                data = dequeue!(queue.queue)
+                unlock(queue.lock)
+                @debug "Processing out-of-order message" outstanding=length(queue.queue)
+                process(data)
+                continue
+            end
+        end
+        unlock(queue.lock)
+        break
+    end
 end
 
 function ensure_args(args)
@@ -124,6 +180,7 @@ end
     id = am_hdr.id
 
     reorder = proc_to_reorder_recv(from)
+    UCX.@safe_debug "Receiving message" from id
 
     param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
     if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
@@ -132,18 +189,22 @@ end
             ptr = Base.unsafe_convert(Ptr{UInt8}, data)
             msg = deserialize_msg(Msg, from, Base.unsafe_wrap(Array, ptr, length))::Msg
             handle_msg(msg, am_hdr.hdr)
+            @async drain!(reorder)
             return UCX.API.UCS_OK
         else
             UCX.@spawn_showerr begin
+                ptr = Base.unsafe_convert(Ptr{UInt8}, data)
+                buf = Base.unsafe_wrap(Array, ptr, length)
                 if can_process!(reorder, id)
-                    ptr = Base.unsafe_convert(Ptr{UInt8}, data)
-                    msg = deserialize_msg(Msg, from, Base.unsafe_wrap(Array, ptr, length))::Msg
+                    msg = deserialize_msg(Msg, from, buf)::Msg
                     UCX.am_data_release(worker, data)
                     handle_msg(msg, am_hdr.hdr)
                 else
-                    UCX.am_data_release(worker, data)
-                    error("AM Message received out-of-order")
+                    dmsg = DelayedMsg(worker, from, buf, length, am_hdr.hdr, true)
+                    enqueue!(reorder, dmsg, id)
+                    @debug "AM Message received out-of-order" id
                 end
+                drain!(reorder)
             end
             return UCX.API.UCS_INPROGRESS
         end
@@ -160,11 +221,22 @@ end
                 msg = deserialize_msg(Msg, from, buffer)::Msg
                 handle_msg(msg, am_hdr.hdr)
             else
-                error("AM Message received out-of-order")
+                dmsg = DelayedMsg(worker, from, buffer, length, am_hdr.hdr, false)
+                enqueue!(reorder, dmsg, id)
+                @debug "AM Message received out-of-order" id
             end
+            drain!(reorder)
         end
         return UCX.API.UCS_INPROGRESS
     end
+end
+
+function process(dmsg::DelayedMsg)
+    ptr = Base.unsafe_convert(Ptr{UInt8}, dmsg.data)
+    buf = Base.unsafe_wrap(Array, ptr, dmsg.length)
+    msg = deserialize_msg(Msg, dmsg.from, buf)
+    dmsg.release && UCX.am_data_release(dmsg.worker, dmsg.data)
+    handle_msg(msg, dmsg.hdr)
 end
 
 const AM_REMOTECALL = 1
@@ -213,9 +285,17 @@ function am_argument(worker, header, header_length, data, length, _param)
     from = read(buf, Int)
     id = read(buf, UInt)
 
+    param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
+
     reorder = proc_to_reorder_recv(from)
     if !(can_process!(reorder, id))
-        error("AM Arg message receive out-of-order")
+        nbuf = copy(buf)
+        dmsg = DelayedArg(worker, from, nbuf, data, length, param)
+        enqueue!(reorder, dmsg, id)
+        UCX.@safe_debug "AM Message received out-of-order" id
+
+        @async drain!(reorder)
+        return UCX.API.UCS_INPROGRESS
     end
 
     amarg = lock(proc_to_serializer_recv(from)) do serializer
@@ -225,23 +305,19 @@ function am_argument(worker, header, header_length, data, length, _param)
         serializer.io = prev_io 
         amarg
     end
+    process_amarg(worker, param, amarg, data, length)
 
-    param = Base.unsafe_load(_param)::UCX.API.ucp_am_recv_param_t
+    @async drain!(reorder)
+    return UCX.API.UCS_INPROGRESS
+end
+
+function process_amarg(worker, param, amarg, data, length)
     if (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) == 0
-        # For small messages do a synchronous receive
-        if length < 512
+        UCX.@spawn_showerr begin
             out = amarg.alloc()
             unsafe_copyto!(out, data)
             put!(Distributed.lookup_ref(amarg.rr), out)
-            return UCX.API.UCS_OK
-        else
-            UCX.@spawn_showerr begin
-                out = amarg.alloc()
-                unsafe_copyto!(out, data)
-                put!(Distributed.lookup_ref(amarg.rr), out)
-                UCX.am_data_release(worker, data)
-            end
-            return UCX.API.UCS_INPROGRESS
+            UCX.am_data_release(worker, data)
         end
     else
         @assert (param.recv_attr & UCX.API.UCP_AM_RECV_ATTR_FLAG_RNDV) != 0
@@ -253,8 +329,18 @@ function am_argument(worker, header, header_length, data, length, _param)
             # UCX.am_data_release not necessary due to am_recv
             put!(Distributed.lookup_ref(amarg.rr), out)
         end
-        return UCX.API.UCS_INPROGRESS
     end
+end
+
+function process(dmsg::DelayedArg)
+    amarg = lock(proc_to_serializer_recv(dmsg.from)) do serializer
+        prev_io = serializer.io
+        serializer.io = dmsg.msgbuf
+        amarg = Distributed.deserialize(serializer)::AMArgHeader
+        serializer.io = prev_io 
+        amarg
+    end
+    process_amarg(dmsg.worker, dmsg.param, amarg, dmsg.data, dmsg.length)
 end
 
 function start()
