@@ -459,11 +459,16 @@ end
         req
     else
         ep = proc_to_endpoint(pid)
-        data = lock(proc_to_serializer_send(pid)) do serializer
+        data, msgid = lock(proc_to_serializer_send(pid)) do serializer
+            reorder = proc_to_reorder_send(pid)
+            msgid = next_id!(reorder)
+
             Base.invokelatest(Distributed.serialize_msg, serializer, msg)
-            take!(serializer.io)
+            take!(serializer.io), msgid
         end
 
+        hdr = AMHeader(hdr.from, msgid, hdr.hdr)
+        @assert hdr.id != 0 
         header = Ref(hdr)
 
         UCX.fence(ep.worker) # Gurantuee order
@@ -483,12 +488,11 @@ end
         alloc = ()->Array{T,N}(undef, shape)
         header = AMArgHeader(self, rr, alloc)
 
-        reorder = proc_to_reorder_send(pid)
-        id = next_id!(reorder)
-        # WHAT ABOUT YIELDS FROM NOW ON...
-
         ep = proc_to_endpoint(pid)
         raw_header = lock(proc_to_serializer_send(pid)) do serializer
+            reorder = proc_to_reorder_send(pid)
+            id = next_id!(reorder)
+
             write(serializer.io, Int(header.from)) # yes...
             write(serializer.io, UInt(id)) # yes...
             Base.invokelatest(Distributed.serialize, serializer, header)
@@ -565,12 +569,8 @@ end
 function remotecall(f, pid, args...; kwargs...)
     rr = Distributed.Future(pid)
 
-    reorder = proc_to_reorder_send(pid)
-    id = next_id!(reorder)
-    # WHAT ABOUT YIELDS FROM NOW ON...
-
     hdr = Distributed.MsgHeader(Distributed.remoteref_id(rr))
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), UInt(0), hdr)
     msg = Distributed.CallMsg{:call}(f, args, kwargs)
 
     req = send_msg(pid, header, msg, AM_REMOTECALL, #=notify=# true)
@@ -582,12 +582,8 @@ function remotecall_fetch(f, pid, args...; kwargs...)
     rv = Distributed.lookup_ref(oid)
     rv.waitingfor = pid
 
-    reorder = proc_to_reorder_send(pid)
-    id = next_id!(reorder)
-    # WHAT ABOUT YIELDS FROM NOW ON...
-
     hdr = Distributed.MsgHeader(Distributed.RRID(0,0), oid)
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), UInt(0), hdr)
     args = map((arg)->send_arg(pid, arg), args)
     msg = Distributed.CallMsg{:call_fetch}(f, args, kwargs)
 
@@ -607,12 +603,8 @@ function remotecall_wait(f, pid, args...; kwargs...)
     rr = Distributed.Future(pid)
     ur = UCXFuture(rr)
 
-    reorder = proc_to_reorder_send(pid)
-    id = next_id!(reorder)
-    # WHAT ABOUT YIELDS FROM NOW ON...
-
     hdr = Distributed.MsgHeader(Distributed.remoteref_id(rr), prid)
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), UInt(0), hdr)
     args = map((arg)->send_arg(pid, arg), args)
     msg = Distributed.CallWaitMsg(f, args, kwargs)
 
@@ -627,12 +619,8 @@ function remotecall_wait(f, pid, args...; kwargs...)
 end
 
 function remote_do(f, pid, args...; kwargs...)
-    reorder = proc_to_reorder_send(pid)
-    id = next_id!(reorder)
-    # WHAT ABOUT YIELDS FROM NOW ON...
-
     hdr = Distributed.MsgHeader()
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), UInt(0), hdr)
 
     msg = Distributed.RemoteDoMsg(f, args, kwargs)
     send_msg(pid, header, msg, AM_REMOTE_DO, #=notify=# true)
@@ -648,12 +636,8 @@ function deliver_result(msg, oid, value)
 
     val = send_arg(oid.whence, val)
 
-    reorder = proc_to_reorder_send(oid.whence)
-    id = next_id!(reorder)
-    # WHAT ABOUT YIELDS FROM NOW ON...
-
     hdr = Distributed.MsgHeader(oid)
-    header = AMHeader(Distributed.myid(), id, hdr)
+    header = AMHeader(Distributed.myid(), UInt(0), hdr)
     _msg = Distributed.ResultMsg(val)
 
     send_msg(oid.whence, header, _msg, AM_RESULT)
