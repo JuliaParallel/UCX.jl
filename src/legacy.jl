@@ -36,11 +36,10 @@ struct AMArg
     rr::Distributed.RRID
 end
 
-struct DelayedMsg
+struct DelayedMsg{Msg}
     worker::UCX.UCXWorker
     from::Int
-    data::Ptr{Cvoid}
-    length::Int
+    buffer::Array{UInt8}
     hdr::Distributed.MsgHeader
     release::Bool
 end
@@ -200,7 +199,7 @@ end
                     UCX.am_data_release(worker, data)
                     handle_msg(msg, am_hdr.hdr)
                 else
-                    dmsg = DelayedMsg(worker, from, buf, length, am_hdr.hdr, true)
+                    dmsg = DelayedMsg{Msg}(worker, from, buf, am_hdr.hdr, true)
                     enqueue!(reorder, dmsg, id)
                     @debug "AM Message received out-of-order" id
                 end
@@ -221,7 +220,7 @@ end
                 msg = deserialize_msg(Msg, from, buffer)::Msg
                 handle_msg(msg, am_hdr.hdr)
             else
-                dmsg = DelayedMsg(worker, from, buffer, length, am_hdr.hdr, false)
+                dmsg = DelayedMsg{Msg}(worker, from, buffer, length, am_hdr.hdr, false)
                 enqueue!(reorder, dmsg, id)
                 @debug "AM Message received out-of-order" id
             end
@@ -231,11 +230,9 @@ end
     end
 end
 
-function process(dmsg::DelayedMsg)
-    ptr = Base.unsafe_convert(Ptr{UInt8}, dmsg.data)
-    buf = Base.unsafe_wrap(Array, ptr, dmsg.length)
-    msg = deserialize_msg(Msg, dmsg.from, buf)
-    dmsg.release && UCX.am_data_release(dmsg.worker, dmsg.data)
+function process(dmsg::DelayedMsg{Msg}) where Msg
+    msg = deserialize_msg(Msg, dmsg.from, dmsg.buffer)
+    dmsg.release && UCX.am_data_release(dmsg.worker, pointer(dmsg.buffer))
     handle_msg(msg, dmsg.hdr)
 end
 
