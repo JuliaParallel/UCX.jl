@@ -102,6 +102,28 @@ macro spawn_showerr(ex)
     end)
 end
 
+using Logging
+
+# define safe loggers for use in generated functions (where task switches are not allowed)
+for level in [:debug, :info, :warn, :error]
+    @eval begin
+        macro $(Symbol("safe_$level"))(ex...)
+            macrocall = :(@placeholder $(ex...))
+            # NOTE: `@placeholder` in order to avoid hard-coding @__LINE__ etc
+            macrocall.args[1] = Symbol($"@$level")
+            quote
+                old_logger = global_logger()
+                io = IOContext(Core.stderr, :color=>get(stderr, :color, false))
+                min_level = Logging.min_enabled_level(old_logger)
+                global_logger(Logging.ConsoleLogger(io, min_level))
+                ret = $(esc(macrocall))
+                global_logger(old_logger)
+                ret
+            end
+        end
+    end
+end
+
 # Config
 
 function version()
@@ -417,7 +439,8 @@ function am_recv_callback(arg::Ptr{Cvoid}, header::Ptr{Cvoid}, header_length::Cs
         lock_am(handler.worker)
         return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
     catch err
-        showerror(stderr, err, catch_backtrace())
+        bt = catch_backtrace()
+        @async showerror(stderr, err, bt)
         return API.UCS_OK
     finally
         unlock_am(handler.worker)
