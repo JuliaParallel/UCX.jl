@@ -220,7 +220,7 @@ end
                 msg = deserialize_msg(Msg, from, buffer)::Msg
                 handle_msg(msg, am_hdr.hdr)
             else
-                dmsg = DelayedMsg{Msg}(worker, from, buffer, length, am_hdr.hdr, false)
+                dmsg = DelayedMsg{Msg}(worker, from, buffer, am_hdr.hdr, false)
                 enqueue!(reorder, dmsg, id)
                 @debug "AM Message received out-of-order" id
             end
