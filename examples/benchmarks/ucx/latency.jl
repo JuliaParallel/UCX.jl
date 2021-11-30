@@ -38,14 +38,18 @@ function benchmark(ep, myid)
                     t_start = Base.time_ns()
                 end
 
-                UCX.stream_send(ep, send_buf, size)
-                UCX.stream_recv(ep, recv_buf, size)
+                req1 = UCX.stream_send(ep, send_buf, size)
+                req2 = UCX.stream_recv(ep, recv_buf, size)
+                wait(req1)
+                wait(req2)
             end
             t_end = Base.time_ns()
         else
             for i in -skip:loop
-                UCX.stream_recv(ep, recv_buf, size)
-                UCX.stream_send(ep, send_buf, size)
+                req1 = UCX.stream_recv(ep, recv_buf, size)
+                req2 = UCX.stream_send(ep, send_buf, size)
+                wait(req1)
+                wait(req2)
             end
         end
 
@@ -69,23 +73,23 @@ function start_server()
     ctx = UCX.UCXContext()
     worker = UCX.UCXWorker(ctx)
 
-    function listener_callback(conn_request_h::UCX.API.ucp_conn_request_h, args::Ptr{Cvoid})
-        conn_request = UCX.UCXConnectionRequest(conn_request_h)
-        Threads.@spawn begin
+    function listener_callback(::UCX.UCXListener, conn_request::UCX.UCXConnectionRequest)
+        UCX.@spawn_showerr begin
             try 
                 benchmark(UCX.UCXEndpoint($worker, $conn_request), 0)
-            catch err
-                showerror(stderr, err, catch_backtrace())
-                exit(-1)
+            finally
+                close($worker)
             end
         end
         nothing
     end
-    cb = @cfunction($listener_callback, Cvoid, (UCX.API.ucp_conn_request_h, Ptr{Cvoid}))
-    listener = UCX.UCXListener(worker, port, cb)
-    while true
-        UCX.progress(worker)
-        yield()
+    listener = UCX.UCXListener(worker, listener_callback, port)
+
+    GC.@preserve listener begin
+        while isopen(worker) 
+            wait(worker)
+        end
+        close(worker)
     end
 end
 
