@@ -1,0 +1,11 @@
+[general]
+library_name = "libucp"
+output_file_path = "../src/api.jl"
+smart_de_anonymize = true
+use_deterministic_symbol = true
+prologue_file_path = "./prologue.jl"
+module_name = "API"
+
+[codegen.macro]
+macro_mode = "basic"
+add_comment_for_skipped_macro = false
