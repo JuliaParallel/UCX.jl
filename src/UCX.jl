@@ -7,6 +7,7 @@ import FunctionWrappers: FunctionWrapper
 const PROGRESS_MODE = Ref(:idling)
 
 include("api.jl")
+include("ip.jl")
 
 function __init__()
     # Julia multithreading uses SIGSEGV to sync thread
@@ -42,14 +43,18 @@ Base.@pure function find_field(::Type{T}, fieldname) where T
     findfirst(f->f === fieldname, fieldnames(T))
 end
 
-@inline function set!(ref::Ref{T}, fieldname, val) where T
+@inline function unsafe_fieldptr(ref::Ref{T}, fieldname) where T
     field = find_field(T, fieldname)
     @assert field !== nothing
     offset = fieldoffset(T, field)
+    base_ptr =  Base.unsafe_convert(Ptr{T}, ref)
+    ptr = reinterpret(UInt, base_ptr) + offset
+    return reinterpret(Ptr{fieldtype(T, field)}, ptr)
+end
+
+@inline function set!(ref::Ref{T}, fieldname, val) where T
     GC.@preserve ref begin
-        base_ptr =  Base.unsafe_convert(Ptr{T}, ref)
-        ptr = reinterpret(UInt, base_ptr) + offset
-        Base.unsafe_store!(reinterpret(Ptr{fieldtype(T, field)}, ptr), val)
+        Base.unsafe_store!(unsafe_fieldptr(ref, fieldname), val)
     end
     val
 end
@@ -528,12 +533,13 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
     field_mask = API.UCP_EP_PARAM_FIELD_FLAGS |
                  API.UCP_EP_PARAM_FIELD_SOCK_ADDR
     flags      = API.UCP_EP_PARAMS_FLAGS_CLIENT_SERVER
-    sockaddr   = Ref(API.IP.sockaddr_in(InetAddr(ip, port)))
+    sockaddr   = Ref(IP.sockaddr_in(InetAddr(ip, port)))
 
     r_handle = Ref{API.ucp_ep_h}()
     GC.@preserve sockaddr begin
-        ptr = Base.unsafe_convert(Ptr{API.sockaddr}, sockaddr)
-        ucs_sockaddr = API.ucs_sock_addr(ptr, sizeof(sockaddr))
+        ptr = Base.unsafe_convert(Ptr{IP.sockaddr_in}, sockaddr)
+        addrlen = sizeof(IP.sockaddr_in)
+        ucs_sockaddr = API.ucs_sock_addr(reinterpret(Ptr{API.sockaddr}, ptr), addrlen)
 
         params = Ref{API.ucp_ep_params}()
         memzero!(params)
@@ -620,7 +626,7 @@ mutable struct UCXListener
 
         field_mask   = API.UCP_LISTENER_PARAM_FIELD_SOCK_ADDR |
                        API.UCP_LISTENER_PARAM_FIELD_CONN_HANDLER
-        sockaddr     = Ref(API.IP.sockaddr_in(InetAddr(IPv4(API.IP.INADDR_ANY), port)))
+        sockaddr     = Ref(IP.sockaddr_in(InetAddr(IPv4(IP.INADDR_ANY), port)))
 
         this = new(C_NULL, worker, port, callback)
 
@@ -629,8 +635,9 @@ mutable struct UCXListener
             args = Base.pointer_from_objref(this)
             conn_handler = API.ucp_listener_conn_handler(@cfunction(listener_callback, Cvoid, (API.ucp_conn_request_h, Ptr{Cvoid})), args)
 
-            ptr = Base.unsafe_convert(Ptr{API.sockaddr}, sockaddr)
-            ucs_sockaddr = API.ucs_sock_addr(ptr, sizeof(sockaddr))
+            ptr = Base.unsafe_convert(Ptr{IP.sockaddr_in}, sockaddr)
+            addrlen = sizeof(IP.sockaddr_in)
+            ucs_sockaddr = API.ucs_sock_addr(reinterpret(Ptr{API.sockaddr}, ptr), addrlen)
 
             params = Ref{API.ucp_listener_params}()
             memzero!(params)
@@ -751,7 +758,7 @@ function recv_callback(req::Ptr{Cvoid}, status::API.ucs_status_t, info::Ptr{API.
     nothing
 end
 
-@inline function request_param(dt, request, cb, flags=nothing)
+@inline function request_param(dt, request, (cb, name), flags=nothing)
     attr_mask = API.UCP_OP_ATTR_FIELD_CALLBACK |
                 API.UCP_OP_ATTR_FIELD_USER_DATA |
                 API.UCP_OP_ATTR_FIELD_DATATYPE
@@ -763,7 +770,10 @@ end
     param = Ref{API.ucp_request_param_t}()
     memzero!(param)
     set!(param, :op_attr_mask, attr_mask)
-    set!(param, :cb,           cb)
+    GC.@preserve param begin
+        ptr = unsafe_fieldptr(param, :cb)
+        Base.setproperty!(ptr, name, cb)
+    end
     set!(param, :datatype,     dt)
     set!(param, :user_data,    Base.pointer_from_objref(request))
     if flags !== nothing
@@ -778,7 +788,7 @@ function send(ep::UCXEndpoint, buffer, nbytes, tag)
     request = UCXRequest(ep, buffer) # rooted through worker
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
 
-    param = request_param(dt, request, cb)
+    param = request_param(dt, request, (cb, :send))
 
     GC.@preserve buffer begin
         data = pointer(buffer)
@@ -792,7 +802,7 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
     request = UCXRequest(worker, buffer) # rooted through worker
     cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}, Ptr{Cvoid}))
 
-    param = request_param(dt, request, cb)
+    param = request_param(dt, request, (cb, :recv))
 
     GC.@preserve buffer begin
         data = pointer(buffer)
@@ -836,7 +846,7 @@ function stream_send(ep::UCXEndpoint, request::UCXRequest, data::Ptr, nbytes)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
 
-    param = request_param(dt, request, cb)
+    param = request_param(dt, request, (cb, :send))
     ptr = API.ucp_stream_send_nbx(ep, data, nbytes, param)
     return handle_request(request, ptr)
 end
@@ -863,7 +873,7 @@ function stream_recv(ep::UCXEndpoint, request::UCXRequest, data::Ptr, nbytes)
     flags = API.UCP_STREAM_RECV_FLAG_WAITALL
 
     length = Ref{Csize_t}(0)
-    param = request_param(dt, request, cb, flags)
+    param = request_param(dt, request, (cb, :recv_stream), flags)
     ptr = API.ucp_stream_recv_nbx(ep, data, nbytes, length, param)
     return handle_request(request, ptr)
 end
@@ -880,7 +890,7 @@ function am_send(ep::UCXEndpoint, id, header, buffer=nothing, flags=nothing)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
     request = UCXRequest(ep, (header, buffer)) # rooted through ep.worker
-    param = request_param(dt, request, cb, flags)
+    param = request_param(dt, request, (cb, :send), flags)
 
     GC.@preserve buffer header begin
         if buffer === nothing
@@ -910,7 +920,7 @@ function am_recv(worker::UCXWorker, data_desc, buffer, nbytes)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(am_data_recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Csize_t, Ptr{Cvoid}))
     request = UCXRequest(worker, buffer) # rooted through ep.worker
-    param = request_param(dt, request, cb)
+    param = request_param(dt, request, (cb, :recv_am))
 
     GC.@preserve buffer begin
         data = pointer(buffer)
