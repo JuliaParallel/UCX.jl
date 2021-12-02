@@ -1,6 +1,6 @@
 name = "UCX"
 uuid = "6b349878-927d-5bd5-ab28-bc3aa4175a33"
-version = "0.3.0"
+version = "0.3.1"
 
 [deps]
 CEnum = "fa961155-64e5-5f13-b03f-caf6b980ea82"
