@@ -29,6 +29,8 @@ function __init__()
         PROGRESS_MODE[] = :idling
     elseif mode == "polling"
         PROGRESS_MODE[] = :polling
+    elseif mode == "libuv"
+        PROGRESS_MODE[] = :libuv
     else
         error("JLUCX_PROGRESS_MODE set to unkown progress mode: $mode")
     end
@@ -58,6 +60,8 @@ end
     end
     val
 end
+
+sync_send(data::Ptr{Cvoid}) = ccall(:uv_async_send, Cint, (Ptr{Cvoid},), data)
 
 # Exceptions/Status
 
@@ -309,6 +313,10 @@ function progress(worker::UCXWorker, allow_yield=true)
     end
 end
 
+function async_progress(worker::UCXWorker)
+    return Base.@threadcall((:ucp_worker_progress, API.libucp), Cuint, (ucp_worker_h,), worker) != 0
+end
+
 function fence(worker::UCXWorker)
     @check API.ucp_worker_fence(worker)
 end
@@ -373,6 +381,11 @@ function Base.wait(worker::UCXWorker)
             ccall(:jl_gc_safepoint, Cvoid, ())
             yield()
             progress(worker)
+        end
+    elseif progress_mode(worker) === :libuv
+        async_progress(worker)
+        while isopen(worker)
+            async_progress(worker)
         end
     else
        throw(UCXException(API.UCS_ERR_UNREACHABLE))
