@@ -31,6 +31,8 @@ function test_memory()
         end
     end
 
+    wait(UCX.flush(UCX_WORKER))
+
     return
 end
 

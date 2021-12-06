@@ -396,6 +396,9 @@ function Base.close(worker::UCXWorker)
     notify(worker)
 end
 
+
+
+
 """
     AMHandler(func)
 
@@ -889,6 +892,18 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
         ptr = API.ucp_tag_recv_nbx(worker, data, nbytes, tag, tag_mask, param)
         return handle_request(request, ptr)
     end
+end
+
+# UCXWorker flush, reuses the send_callback
+function flush(worker::UCXWorker)
+    request = UCXRequest(worker, nothing) # rooted through worker
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+
+    dt = ucp_dt_make_contig(1) # unneeded
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_worker_flush_nbx(worker, param)
+    return handle_request(request, ptr)
 end
 
 # UCX probe & probe msg receive
