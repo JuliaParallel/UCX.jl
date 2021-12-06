@@ -283,6 +283,7 @@ Base.unsafe_convert(::Type{API.ucp_worker_h}, worker::UCXWorker) = worker.handle
 
 ispolling(worker::UCXWorker) = worker.fd != RawFD(-1)
 progress_mode(worker::UCXWorker) = worker.mode
+context(worker::UCXWorker) = worker.context
 
 """
     progress(worker::UCXWorker)
@@ -708,6 +709,10 @@ mutable struct Memory
 end
 Base.unsafe_convert(::Type{API.ucp_mem_h}, memory::Memory) = memory.handle
 
+function Memory(ctx::UCXContext, arr::Array)
+    Memory(ctx, arr, pointer(arr), sizeof(arr))
+end
+
 ##
 # RemoteKey
 ## 
@@ -717,7 +722,7 @@ mutable struct RemoteKey
 
     function RemoteKey(ep::UCXEndpoint, buffer)
         r_rkey = Ref{API.ucp_rkey_h}()
-        @check API.ucp_rkey_unpack(ep, buffer, r_rkey)
+        @check API.ucp_ep_rkey_unpack(ep, buffer, r_rkey)
         this = new(r_rkey[])
         finalizer(this) do rkey
             API.ucp_rkey_destroy(rkey)
@@ -728,11 +733,11 @@ end
 Base.unsafe_convert(::Type{API.ucp_rkey_h}, rkey::RemoteKey) = rkey.handle
 
 function rkey_pack(memory::Memory)
-    r_data = Ref{Ptr{UInt8}}()
+    r_data = Ref{Ptr{Cvoid}}()
     r_size = Ref{Csize_t}()
     @check API.ucp_rkey_pack(memory.ctx, memory, r_data, r_size)
-    buffer = copy(unsafe_wrap(Array, r_data[], r_size[], own=false))
-    @check API.ucp_rkey_buffer_release(r_data[])
+    buffer = copy(unsafe_wrap(Array{UInt8}, Base.unsafe_convert(Ptr{UInt8}, r_data[]), r_size[] % Int, own=false))
+    API.ucp_rkey_buffer_release(r_data[])
     return buffer
 end
 

@@ -61,6 +61,22 @@ end
     end
 end
 
+@testset "Remote Memory Access" begin
+    cmd = Base.julia_cmd()
+    if Base.JLOptions().project != C_NULL
+        cmd = `$cmd --project=$(unsafe_string(Base.JLOptions().project))`
+    end
+    setup  = joinpath(@__DIR__, "setup.jl")
+    script = joinpath(@__DIR__, "rma.jl")
+    @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
+    withenv("JLUCX_PROGRESS_MODE" => "busy") do
+        @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
+    end
+    withenv("JLUCX_PROGRESS_MODE" => "polling") do
+        @test success(pipeline(`$cmd -L setup.jl $script`, stderr=stderr, stdout=stdout))
+    end
+end
+
 @testset "examples" begin
     examples_dir = joinpath(@__DIR__, "..", "examples")
     cmd = Base.julia_cmd()
