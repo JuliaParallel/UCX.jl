@@ -182,7 +182,8 @@ mutable struct UCXContext
         # There is also AMO32 & AMO64 (atomic), RMA,
         features     = API.UCP_FEATURE_TAG |
                        API.UCP_FEATURE_STREAM |
-                       API.UCP_FEATURE_AM
+                       API.UCP_FEATURE_AM |
+                       API.UCP_FEATURE_RMA
 
         if wakeup
             features |= API.UCP_FEATURE_WAKEUP
@@ -663,6 +664,82 @@ end
 
 function ucp_dt_make_contig(elem_size)
     ((elem_size%API.ucp_datatype_t) << convert(API.ucp_datatype_t, API.UCP_DATATYPE_SHIFT)) | API.UCP_DATATYPE_CONTIG
+end
+
+##
+# UCX Memory
+##
+
+# TODO: Support memory_type
+mutable struct Memory
+    handle::API.ucp_mem_h
+    ctx::UCXContext
+    base::UInt64
+    obj
+
+    function Memory(ctx::UCXContext, obj, addr::Ptr, length)
+        field_mask = API.UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+                     API.UCP_MEM_MAP_PARAM_FIELD_LENGTH
+
+        # if data === nothing
+        #     @assert addr == C_NULL
+        #     field_mask |= API.UCP_MEM_MAP_PARAM_FIELD_FLAGS
+        # end
+        
+        params = Ref{API.ucp_mem_map_params}()
+        memzero!(params)
+        set!(params, :field_mask,   field_mask)
+        set!(params, :address,      addr)
+        set!(params, :length,       length)
+        # if data === nothing
+        #     set!(params, :flags, API.UCP_MEM_MAP_NONBLOCK | API.UCP_MEM_MAP_ALLOCATE)
+        # end
+
+        r_handle = Ref{API.ucp_mem_h}()
+        @check API.ucp_mem_map(ctx, params, r_handle)
+
+        base = UInt64(reinterpret(UInt, addr))
+        this = new(r_handle[], ctx, base, obj)
+        finalizer(this) do memory
+            API.ucp_mem_unmap(memory.ctx, memory)
+        end
+        this
+    end
+end
+Base.unsafe_convert(::Type{API.ucp_mem_h}, memory::Memory) = memory.handle
+
+##
+# RemoteKey
+## 
+
+mutable struct RemoteKey
+    handle::API.ucp_rkey_h
+
+    function RemoteKey(ep::UCXEndpoint, buffer)
+        r_rkey = Ref{API.ucp_rkey_h}()
+        @check API.ucp_rkey_unpack(ep, buffer, r_rkey)
+        this = new(r_rkey[])
+        finalizer(this) do rkey
+            API.ucp_rkey_destroy(rkey)
+        end
+        this
+    end
+end
+Base.unsafe_convert(::Type{API.ucp_rkey_h}, rkey::RemoteKey) = rkey.handle
+
+function rkey_pack(memory::Memory)
+    r_data = Ref{Ptr{UInt8}}()
+    r_size = Ref{Csize_t}()
+    @check API.ucp_rkey_pack(memory.ctx, memory, r_data, r_size)
+    buffer = copy(unsafe_wrap(Array, r_data[], r_size[], own=false))
+    @check API.ucp_rkey_buffer_release(r_data[])
+    return buffer
+end
+
+function Base.pointer(rkey::RemoteKey, raddr::UInt64)
+    r_ptr = Ref{Ptr{Cvoid}}()
+    @check API.ucp_rkey_ptr(rkey, raddr, r_ptr)
+    return r_ptr[]
 end
 
 ##
