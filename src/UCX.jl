@@ -173,13 +173,11 @@ mutable struct UCXContext
     handle::API.ucp_context_h
     config::Dict{Symbol, String}
 
-    function UCXContext(wakeup = PROGRESS_MODE[] == :polling; kwargs...)
+    function UCXContext(wakeup = true; kwargs...)
         field_mask   = API.UCP_PARAM_FIELD_FEATURES
 
         # Note: ucx-py always request UCP_FEATURE_WAKEUP even when in blocking mode
         # See <https://github.com/rapidsai/ucx-py/pull/377>
-        # But FEATURE_WAKEUP disables shared memory, see https://github.com/openucx/ucx/issues/5322
-        # and https://github.com/JuliaParallel/UCX.jl/issues/36
 
         # There is also AMO32 & AMO64 (atomic), RMA,
         features     = API.UCP_FEATURE_TAG |
