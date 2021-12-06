@@ -895,7 +895,7 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
 end
 
 # UCXWorker flush, reuses the send_callback
-function flush(worker::UCXWorker)
+function Base.flush(worker::UCXWorker)
     request = UCXRequest(worker, nothing) # rooted through worker
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
 
@@ -903,6 +903,17 @@ function flush(worker::UCXWorker)
     param = request_param(dt, request, (cb, :send))
 
     ptr = API.ucp_worker_flush_nbx(worker, param)
+    return handle_request(request, ptr)
+end
+
+function Base.flush(ep::UCXEndpoint)
+    request = UCXRequest(ep, nothing) # rooted through worker
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+
+    dt = ucp_dt_make_contig(1) # unneeded
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_ep_flush_nbx(ep, param)
     return handle_request(request, ptr)
 end
 
@@ -976,6 +987,60 @@ end
 ### TODO: stream_recv_data_nbx
 
 ## RMA
+
+
+import Base.get!
+function get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_get_nbx(ep, data, nbytes, remote_addr, rkey, param)
+    return handle_request(request, ptr)
+end
+
+function get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+    request = UCXRequest(ep, buffer) # rooted through ep.worker
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        get!(ep, request, data, nbytes, remote_addr, rkey)
+    end
+end
+
+function get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+    request = UCXRequest(ep, ref) # rooted through ep.worker
+    GC.@preserve ref begin
+        data = Base.unsafe_convert(Ptr{Cvoid}, ref)
+        get!(ep, request, data, sizeof(T), remote_addr, rkey)
+    end
+end
+
+
+import Base.put!
+function put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_put_nbx(ep, data, nbytes, remote_addr, rkey, param)
+    return handle_request(request, ptr)
+end
+
+function put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+    request = UCXRequest(ep, buffer) # rooted through ep.worker
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        put!(ep, request, data, nbytes, remote_addr, rkey)
+    end
+end
+
+function put!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+    request = UCXRequest(ep, ref) # rooted through ep.worker
+    GC.@preserve ref begin
+        data = Base.unsafe_convert(Ptr{Cvoid}, ref)
+        put!(ep, request, data, sizeof(T), remote_addr, rkey)
+    end
+end
 
 ## Atomics
 
