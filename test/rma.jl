@@ -100,5 +100,9 @@ end
     data = rand(8)
     check_data = copy(data)
     @test bounce(ep, check_data, base_addr_neighbor, rkey) == check_data
+
+    arr = UCX.RemoteArray{Float32}(ep, base_addr_neighbor, rkey, div(64, sizeof(Float32)))
+    arr[1] = 1.0f0
+    @test arr[1] == 1.0f0
     nothing
 end

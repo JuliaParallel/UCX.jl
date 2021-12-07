@@ -1165,4 +1165,34 @@ function stream_recv(ep::Endpoint, args...)
     stream_recv(ep.ep, args...)
 end
 
+struct RemoteArray{T,N} <: AbstractArray{T,N}
+    ep::UCXEndpoint
+    remote_addr::UInt64
+    rkey::RemoteKey
+    dims::NTuple{N, Int}
+
+    function RemoteArray{T}(ep, remote_addr, rkey, dims...) where T
+        new{T, length(dims)}(ep, remote_addr, rkey, dims)
+    end
+end
+
+Base.size(ra::RemoteArray) = ra.dims
+Base.IndexStyle(::Type{<:RemoteArray}) = Base.IndexLinear()
+
+function Base.getindex(ra::RemoteArray{T}, index) where T
+    value = Ref{T}()
+    offset = ra.remote_addr + sizeof(T) * index
+    wait(get!(ra.ep, value, offset % UInt64, ra.rkey)) # TODO: Optimize by avoiding allocation for `out`
+    return value[]
+end
+
+function Base.setindex!(ra::RemoteArray{T}, val, index) where T
+    value = Ref{T}(val)
+    offset = ra.remote_addr + sizeof(T) * index
+    wait(put!(ra.ep, value, offset % UInt64, ra.rkey)) # TODO: Optimize by avoiding allocation for `out`
+    return value[]
+end
+
+# TODO: Implement copyto!, and optimized range get/set
+
 end #module
