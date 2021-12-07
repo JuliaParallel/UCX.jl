@@ -104,5 +104,13 @@ end
     arr = UCX.RemoteArray{Float32}(ep, base_addr_neighbor, rkey, div(64, sizeof(Float32)))
     arr[1] = 1.0f0
     @test arr[1] == 1.0f0
+
+    arr = UCX.RemoteArray{UInt8}(ep, base_addr_neighbor, rkey, 64)
+    io = IOBuffer(arr, read=true, write=true,  maxsize=64)
+    truncate(io, 0)
+    write(io, "hello")
+    seekstart(io)
+    @test String(take!(io)) == "hello"
+
     nothing
 end
