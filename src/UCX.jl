@@ -182,7 +182,8 @@ mutable struct UCXContext
         # There is also AMO32 & AMO64 (atomic), RMA,
         features     = API.UCP_FEATURE_TAG |
                        API.UCP_FEATURE_STREAM |
-                       API.UCP_FEATURE_AM
+                       API.UCP_FEATURE_AM |
+                       API.UCP_FEATURE_RMA
 
         if wakeup
             features |= API.UCP_FEATURE_WAKEUP
@@ -282,6 +283,7 @@ Base.unsafe_convert(::Type{API.ucp_worker_h}, worker::UCXWorker) = worker.handle
 
 ispolling(worker::UCXWorker) = worker.fd != RawFD(-1)
 progress_mode(worker::UCXWorker) = worker.mode
+context(worker::UCXWorker) = worker.context
 
 """
     progress(worker::UCXWorker)
@@ -393,6 +395,9 @@ function Base.close(worker::UCXWorker)
     worker.open = false
     notify(worker)
 end
+
+
+
 
 """
     AMHandler(func)
@@ -666,6 +671,86 @@ function ucp_dt_make_contig(elem_size)
 end
 
 ##
+# UCX Memory
+##
+
+# TODO: Support memory_type
+mutable struct Memory
+    handle::API.ucp_mem_h
+    ctx::UCXContext
+    base::UInt64
+    obj
+
+    function Memory(ctx::UCXContext, obj, addr::Ptr, length)
+        field_mask = API.UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
+                     API.UCP_MEM_MAP_PARAM_FIELD_LENGTH
+
+        # if data === nothing
+        #     @assert addr == C_NULL
+        #     field_mask |= API.UCP_MEM_MAP_PARAM_FIELD_FLAGS
+        # end
+        
+        params = Ref{API.ucp_mem_map_params}()
+        memzero!(params)
+        set!(params, :field_mask,   field_mask)
+        set!(params, :address,      addr)
+        set!(params, :length,       length)
+        # if data === nothing
+        #     set!(params, :flags, API.UCP_MEM_MAP_NONBLOCK | API.UCP_MEM_MAP_ALLOCATE)
+        # end
+
+        r_handle = Ref{API.ucp_mem_h}()
+        @check API.ucp_mem_map(ctx, params, r_handle)
+
+        base = UInt64(reinterpret(UInt, addr))
+        this = new(r_handle[], ctx, base, obj)
+        finalizer(this) do memory
+            API.ucp_mem_unmap(memory.ctx, memory)
+        end
+        this
+    end
+end
+Base.unsafe_convert(::Type{API.ucp_mem_h}, memory::Memory) = memory.handle
+
+function Memory(ctx::UCXContext, arr::Array)
+    Memory(ctx, arr, pointer(arr), sizeof(arr))
+end
+
+##
+# RemoteKey
+## 
+
+mutable struct RemoteKey
+    handle::API.ucp_rkey_h
+
+    function RemoteKey(ep::UCXEndpoint, buffer)
+        r_rkey = Ref{API.ucp_rkey_h}()
+        @check API.ucp_ep_rkey_unpack(ep, buffer, r_rkey)
+        this = new(r_rkey[])
+        finalizer(this) do rkey
+            API.ucp_rkey_destroy(rkey)
+        end
+        this
+    end
+end
+Base.unsafe_convert(::Type{API.ucp_rkey_h}, rkey::RemoteKey) = rkey.handle
+
+function rkey_pack(memory::Memory)
+    r_data = Ref{Ptr{Cvoid}}()
+    r_size = Ref{Csize_t}()
+    @check API.ucp_rkey_pack(memory.ctx, memory, r_data, r_size)
+    buffer = copy(unsafe_wrap(Array{UInt8}, Base.unsafe_convert(Ptr{UInt8}, r_data[]), r_size[] % Int, own=false))
+    API.ucp_rkey_buffer_release(r_data[])
+    return buffer
+end
+
+function Base.pointer(rkey::RemoteKey, raddr::UInt64)
+    r_ptr = Ref{Ptr{Cvoid}}()
+    @check API.ucp_rkey_ptr(rkey, raddr, r_ptr)
+    return r_ptr[]
+end
+
+##
 # Request handling
 ##
 
@@ -809,6 +894,29 @@ function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp
     end
 end
 
+# UCXWorker flush, reuses the send_callback
+function Base.flush(worker::UCXWorker)
+    request = UCXRequest(worker, nothing) # rooted through worker
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+
+    dt = ucp_dt_make_contig(1) # unneeded
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_worker_flush_nbx(worker, param)
+    return handle_request(request, ptr)
+end
+
+function Base.flush(ep::UCXEndpoint)
+    request = UCXRequest(ep, nothing) # rooted through worker
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+
+    dt = ucp_dt_make_contig(1) # unneeded
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_ep_flush_nbx(ep, param)
+    return handle_request(request, ptr)
+end
+
 # UCX probe & probe msg receive
 
 ##
@@ -879,6 +987,60 @@ end
 ### TODO: stream_recv_data_nbx
 
 ## RMA
+
+
+import Base.get!
+function get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_get_nbx(ep, data, nbytes, remote_addr, rkey, param)
+    return handle_request(request, ptr)
+end
+
+function get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+    request = UCXRequest(ep, buffer) # rooted through ep.worker
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        get!(ep, request, data, nbytes, remote_addr, rkey)
+    end
+end
+
+function get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+    request = UCXRequest(ep, ref) # rooted through ep.worker
+    GC.@preserve ref begin
+        data = Base.unsafe_convert(Ptr{Cvoid}, ref)
+        get!(ep, request, data, sizeof(T), remote_addr, rkey)
+    end
+end
+
+
+import Base.put!
+function put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+    dt = ucp_dt_make_contig(1) # since we are sending nbytes
+    cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
+    param = request_param(dt, request, (cb, :send))
+
+    ptr = API.ucp_put_nbx(ep, data, nbytes, remote_addr, rkey, param)
+    return handle_request(request, ptr)
+end
+
+function put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+    request = UCXRequest(ep, buffer) # rooted through ep.worker
+    GC.@preserve buffer begin
+        data = pointer(buffer)
+        put!(ep, request, data, nbytes, remote_addr, rkey)
+    end
+end
+
+function put!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+    request = UCXRequest(ep, ref) # rooted through ep.worker
+    GC.@preserve ref begin
+        data = Base.unsafe_convert(Ptr{Cvoid}, ref)
+        put!(ep, request, data, sizeof(T), remote_addr, rkey)
+    end
+end
 
 ## Atomics
 
@@ -1002,5 +1164,35 @@ end
 function stream_recv(ep::Endpoint, args...)
     stream_recv(ep.ep, args...)
 end
+
+struct RemoteArray{T,N} <: AbstractArray{T,N}
+    ep::UCXEndpoint
+    remote_addr::UInt64
+    rkey::RemoteKey
+    dims::NTuple{N, Int}
+
+    function RemoteArray{T}(ep, remote_addr, rkey, dims...) where T
+        new{T, length(dims)}(ep, remote_addr, rkey, dims)
+    end
+end
+
+Base.size(ra::RemoteArray) = ra.dims
+Base.IndexStyle(::Type{<:RemoteArray}) = Base.IndexLinear()
+
+function Base.getindex(ra::RemoteArray{T}, index) where T
+    value = Ref{T}()
+    offset = ra.remote_addr + sizeof(T) * index
+    wait(get!(ra.ep, value, offset % UInt64, ra.rkey)) # TODO: Optimize by avoiding allocation for `out`
+    return value[]
+end
+
+function Base.setindex!(ra::RemoteArray{T}, val, index) where T
+    value = Ref{T}(val)
+    offset = ra.remote_addr + sizeof(T) * index
+    wait(put!(ra.ep, value, offset % UInt64, ra.rkey)) # TODO: Optimize by avoiding allocation for `out`
+    return value[]
+end
+
+# TODO: Implement copyto!, and optimized range get/set
 
 end #module
