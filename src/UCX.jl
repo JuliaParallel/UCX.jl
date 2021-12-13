@@ -3,6 +3,7 @@ module UCX
 using Sockets: InetAddr, IPv4, listenany
 using Random
 import FunctionWrappers: FunctionWrapper
+import CEnum
 
 const PROGRESS_MODE = Ref(:idling)
 
@@ -117,6 +118,21 @@ function version()
     VersionNumber(major[], minor[], patch[])
 end
 
+function query()
+    field_mask = API.UCP_LIB_ATTR_FIELD_MAX_THREAD_LEVEL
+    r_attr = Ref{API.ucp_lib_attr_t}()
+
+    memzero!(r_attr)
+    set!(r_attr, :field_mask, field_mask)
+
+    @check API.ucp_lib_query(r_attr)
+    r_attr[]
+end
+
+function max_thread_level()
+    query().max_thread_level
+end
+
 mutable struct UCXConfig
     handle::Ptr{API.ucp_config_t}
 
@@ -171,28 +187,48 @@ end
 
 mutable struct UCXContext
     handle::API.ucp_context_h
+    features::UInt32
     config::Dict{Symbol, String}
 
-    function UCXContext(wakeup = true; kwargs...)
-        field_mask   = API.UCP_PARAM_FIELD_FEATURES
+    function UCXContext(;wakeup = true, tag = true, stream = true, am = true, rdma = true, amo = true,
+                         shared = false,
+                         kwargs...)
+        field_mask = API.UCP_PARAM_FIELD_FEATURES
 
-        # Note: ucx-py always request UCP_FEATURE_WAKEUP even when in blocking mode
-        # See <https://github.com/rapidsai/ucx-py/pull/377>
+        if shared
+            field_mask |= API.UCP_PARAM_FIELD_MT_WORKERS_SHARED
+        end
 
-        # There is also AMO32 & AMO64 (atomic), RMA,
-        features     = API.UCP_FEATURE_TAG |
-                       API.UCP_FEATURE_STREAM |
-                       API.UCP_FEATURE_AM |
-                       API.UCP_FEATURE_RMA
-
+        features = zero(CEnum.basetype(UCX.API.ucp_feature))
         if wakeup
             features |= API.UCP_FEATURE_WAKEUP
+        end
+        if tag
+            features |= API.UCP_FEATURE_TAG
+        end
+        if stream
+            features |= API.UCP_FEATURE_STREAM
+        end
+        if am
+            features |= API.UCP_FEATURE_AM
+        end
+        if rdma
+            features |= API.UCP_FEATURE_RMA
+        end
+        if amo
+            features |= API.UCP_FEATURE_AMO32 |
+                        API.UCP_FEATURE_AMO64 |
+                        API.UCP_FEATURE_RMA
         end
 
         params = Ref{API.ucp_params}()
         memzero!(params)
         set!(params, :field_mask,      field_mask)
         set!(params, :features,        features)
+
+        if shared
+            set!(params, :mt_workers_shared, true)
+        end
 
         config = UCXConfig(; kwargs...)
 
@@ -201,7 +237,7 @@ mutable struct UCXContext
         @check API.ucp_init_version(API.UCP_API_MAJOR, API.UCP_API_MINOR,
                                     params, config, r_handle)
 
-        context = new(r_handle[], parse(Dict, config))
+        context = new(r_handle[], features, parse(Dict, config))
 
         finalizer(context) do context
             API.ucp_cleanup(context)
@@ -231,9 +267,18 @@ function info(ucx::UCXContext)
 end
 
 function query(ctx::UCXContext)
+    field_mask = API.UCP_ATTR_FIELD_THREAD_MODE
     r_attr = Ref{API.ucp_context_attr_t}()
-    API.ucp_context_query(ctx, r_attr)
+
+    memzero!(r_attr)
+    set!(r_attr, :field_mask, field_mask)
+
+    @check API.ucp_context_query(ctx, r_attr)
     r_attr[]
+end
+
+function thread_mode(ctx::UCXContext)
+    query(ctx).thread_mode
 end
 
 mutable struct UCXWorker
@@ -280,6 +325,25 @@ mutable struct UCXWorker
     end
 end
 Base.unsafe_convert(::Type{API.ucp_worker_h}, worker::UCXWorker) = worker.handle
+
+function query(worker::UCXWorker)
+    field_mask = API.UCP_WORKER_ATTR_FIELD_THREAD_MODE |
+                 API.UCP_WORKER_ATTR_FIELD_MAX_AM_HEADER
+    r_attr = Ref{API.ucp_worker_attr_t}()
+
+    memzero!(r_attr)
+    set!(r_attr, :field_mask, field_mask)
+    API.ucp_worker_query(worker, r_attr)
+    r_attr[]
+end
+
+function thread_mode(worker::UCXWorker)
+    query(worker).thread_mode
+end
+
+function max_am_header(worker::UCXWorker)
+    query(worker).max_am_header
+end
 
 ispolling(worker::UCXWorker) = worker.fd != RawFD(-1)
 progress_mode(worker::UCXWorker) = worker.mode

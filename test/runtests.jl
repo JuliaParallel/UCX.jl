@@ -12,6 +12,29 @@ using UCX
     @test ctx.config[:TLS] == "tcp"
 end
 
+@testset "query" begin
+    # TODO support other builds
+    UCX.max_thread_level() == UCX.API.UCS_THREAD_MODE_MULTI
+end
+
+@testset "context" begin
+    ctx = UCX.UCXContext(TLS="tcp")
+    @test ctx.config[:TLS] == "tcp"
+
+    @test UCX.thread_mode(UCX.UCXContext(; shared=false)) == UCX.API.UCS_THREAD_MODE_SINGLE
+    @test UCX.thread_mode(UCX.UCXContext(; shared=true)) == UCX.API.UCS_THREAD_MODE_MULTI
+end
+
+@testset "Worker" begin
+    worker = UCX.UCXWorker(UCX.UCXContext())
+
+    UCX.thread_mode(worker) == UCX.API.UCS_THREAD_MODE_MULTI
+    UCX.max_am_header(worker) > 0
+
+    worker = UCX.UCXWorker(UCX.UCXContext(; am = false))
+    UCX.max_am_header(worker) == 0
+end
+
 @testset "progress" begin
     using UCX
     UCX.PROGRESS_MODE[] = :polling
