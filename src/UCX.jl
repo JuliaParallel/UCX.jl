@@ -271,11 +271,7 @@ mutable struct UCXWorker
         end
 
         worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}(), fill(false, Base.Threads.nthreads()), true, progress_mode)
-        finalizer(worker) do worker
-            worker.open = false
-            @assert isempty(worker.inflight)
-            API.ucp_worker_destroy(worker)
-        end
+        finalizer(destroy, worker)
         return worker
     end
 end
@@ -311,6 +307,15 @@ end
 
 function fence(worker::UCXWorker)
     @check API.ucp_worker_fence(worker)
+end
+
+function destroy(worker::UCXWorker)
+    if worker.handle != C_NULL
+        close(worker)
+        @assert isempty(worker.inflight)
+        API.ucp_worker_destroy(worker)
+        worker.handle = C_NULL
+    end
 end
 
 function lock_am(worker::UCXWorker)
@@ -387,17 +392,15 @@ function Base.notify(worker::UCXWorker)
 end
 
 function Base.isopen(worker::UCXWorker)
-    worker.open
+    worker.open && worker.handle != C_NULL
 end
 
 function Base.close(worker::UCXWorker)
-    @debug "Close worker"
-    worker.open = false
-    notify(worker)
+    if isopen(worker)
+        worker.open = false
+        notify(worker)
+    end
 end
-
-
-
 
 """
     AMHandler(func)
@@ -533,8 +536,7 @@ end
 Base.unsafe_convert(::Type{API.ucp_ep_h}, ep::UCXEndpoint) = ep.handle
 
 function ucp_err_handler(arg::Ptr{Cvoid}, ep::API.ucp_ep_h, status::API.ucs_status_t)
-    @error "Endpoint error" exception=UCXException(status)
-    # TODO should we throw here and close the endpoint?
+    throw(UCXException(status))
     return nothing
 end
 
