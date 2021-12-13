@@ -4,6 +4,7 @@ on:
     branches:
       - main
     tags: "*"
+  pull-request:
 jobs:
   docs:
     name: Documentation
@@ -19,6 +20,7 @@ jobs:
             using Pkg
             Pkg.develop(PackageSpec(path=pwd()))
             Pkg.instantiate()
+            Pkg.build("UCX")
           '
       - name: run doctests
         run: |
