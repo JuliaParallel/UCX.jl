@@ -45,7 +45,7 @@ makedocs(;
 )
 
 deploydocs(;
-    repo="github.com/cesmix-mit/UCX.jl",
+    repo="github.com/JuliaParallel/UCX.jl",
     devbranch = "main",
     push_preview = true,
 )
