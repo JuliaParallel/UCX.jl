@@ -4,7 +4,7 @@ on:
     branches:
       - main
     tags: "*"
-  pull-request:
+  pull_request:
 jobs:
   docs:
     name: Documentation
