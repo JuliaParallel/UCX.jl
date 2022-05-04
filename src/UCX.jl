@@ -839,7 +839,7 @@ function unroot(request::UCXRequest)
 end
 
 function UCXRequest(_request::Ptr{Cvoid})
-    request = Base.unsafe_pointer_to_objref(_request) # rooted through inflight
+    request = Base.unsafe_pointer_to_objref(_request)::UCXRequest # rooted through inflight
     unroot(request) # caller is now responsible
 
     return request
