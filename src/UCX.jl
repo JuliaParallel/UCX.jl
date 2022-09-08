@@ -316,11 +316,7 @@ mutable struct UCXWorker
         end
 
         worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}(), fill(false, Base.Threads.nthreads()), true, progress_mode)
-        finalizer(worker) do worker
-            worker.open = false
-            @assert isempty(worker.inflight)
-            API.ucp_worker_destroy(worker)
-        end
+        finalizer(destroy, worker)
         return worker
     end
 end
@@ -375,6 +371,15 @@ end
 
 function fence(worker::UCXWorker)
     @check API.ucp_worker_fence(worker)
+end
+
+function destroy(worker::UCXWorker)
+    if worker.handle != C_NULL
+        close(worker)
+        @assert isempty(worker.inflight)
+        API.ucp_worker_destroy(worker)
+        worker.handle = C_NULL
+    end
 end
 
 function lock_am(worker::UCXWorker)
@@ -451,17 +456,15 @@ function Base.notify(worker::UCXWorker)
 end
 
 function Base.isopen(worker::UCXWorker)
-    worker.open
+    worker.open && worker.handle != C_NULL
 end
 
 function Base.close(worker::UCXWorker)
-    @debug "Close worker"
-    worker.open = false
-    notify(worker)
+    if isopen(worker)
+        worker.open = false
+        notify(worker)
+    end
 end
-
-
-
 
 """
     AMHandler(func)
@@ -596,9 +599,19 @@ mutable struct UCXEndpoint
 end
 Base.unsafe_convert(::Type{API.ucp_ep_h}, ep::UCXEndpoint) = ep.handle
 
-function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
+function ucp_err_handler(arg::Ptr{Cvoid}, ep::API.ucp_ep_h, status::API.ucs_status_t)
+    throw(UCXException(status))
+    return nothing
+end
+
+function UCXEndpoint(worker::UCXWorker, ip::IPv4, port;
+                     error_handling=true)
     field_mask = API.UCP_EP_PARAM_FIELD_FLAGS |
                  API.UCP_EP_PARAM_FIELD_SOCK_ADDR
+    if error_handling
+        field_mask |= API.UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                      API.UCP_EP_PARAM_FIELD_ERR_HANDLER
+    end
     flags      = API.UCP_EP_PARAMS_FLAGS_CLIENT_SERVER
     sockaddr   = Ref(IP.sockaddr_in(InetAddr(ip, port)))
 
@@ -613,8 +626,15 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
         set!(params, :field_mask,   field_mask)
         set!(params, :sockaddr,     ucs_sockaddr)
         set!(params, :flags,        flags)
+        if error_handling
+            err_handler = API.ucp_err_handler(
+                @cfunction(ucp_err_handler, Cvoid, (Ptr{Cvoid}, API.ucp_ep_h, API.ucs_status_t)),
+                C_NULL
+            )
 
-        # TODO: Error callback
+            set!(params, :err_mode, API.UCP_ERR_HANDLING_MODE_PEER)
+            set!(params, :err_handler, err_handler)
+        end
     
         @check API.ucp_ep_create(worker, params, r_handle)
     end
@@ -622,9 +642,15 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
     UCXEndpoint(worker, r_handle[])
 end
 
-function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
+function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest;
+                     error_handling=true)
     field_mask = API.UCP_EP_PARAM_FIELD_FLAGS |
                  API.UCP_EP_PARAM_FIELD_CONN_REQUEST
+    if error_handling
+        field_mask |= API.UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                      API.UCP_EP_PARAM_FIELD_ERR_HANDLER
+    end
+
     flags      = API.UCP_EP_PARAMS_FLAGS_NO_LOOPBACK
 
     params = Ref{API.ucp_ep_params}()
@@ -632,8 +658,15 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     set!(params, :field_mask,   field_mask)
     set!(params, :conn_request, conn_request.handle)
     set!(params, :flags,        flags)
+    if error_handling
+        err_handler = API.ucp_err_handler(
+            @cfunction(ucp_err_handler, Cvoid, (Ptr{Cvoid}, API.ucp_ep_h, API.ucs_status_t)),
+            C_NULL
+        )
 
-    # TODO: Error callback
+        set!(params, :err_mode, API.UCP_ERR_HANDLING_MODE_PEER)
+        set!(params, :err_handler, err_handler)
+    end
 
     r_handle = Ref{API.ucp_ep_h}()
     @check API.ucp_ep_create(worker, params, r_handle)
@@ -641,29 +674,42 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
     UCXEndpoint(worker, r_handle[])
 end
 
-function UCXEndpoint(worker::UCXWorker, addr::UCXAddress)
+function UCXEndpoint(worker::UCXWorker, addr::UCXAddress;
+                     error_handling=true)
     GC.@preserve addr begin
-        _UCXEndpoint(worker, addr.handle)
+        _UCXEndpoint(worker, addr.handle, error_handling)
     end
 end
 
-function UCXEndpoint(worker::UCXWorker, addr_buf::Vector{UInt8})
+function UCXEndpoint(worker::UCXWorker, addr_buf::Vector{UInt8};
+                     error_handling=true)
     GC.@preserve addr_buf begin
         addr = Base.unsafe_convert(Ptr{API.ucp_address_t}, pointer(addr_buf))
-        _UCXEndpoint(worker, addr)
+        _UCXEndpoint(worker, addr, error_handling)
     end
 end
 
-function _UCXEndpoint(worker::UCXWorker, addr::Ptr{API.ucp_address_t})
+function _UCXEndpoint(worker::UCXWorker, addr::Ptr{API.ucp_address_t}, error_handling)
     field_mask = API.UCP_EP_PARAM_FIELD_REMOTE_ADDRESS
+    if error_handling
+        field_mask |= API.UCP_EP_PARAM_FIELD_ERR_HANDLING_MODE |
+                      API.UCP_EP_PARAM_FIELD_ERR_HANDLER
+    end
 
     r_handle = Ref{API.ucp_ep_h}()
     params = Ref{API.ucp_ep_params}()
     memzero!(params)
     set!(params, :field_mask,   field_mask)
     set!(params, :address,      addr)
+    if error_handling
+        err_handler = API.ucp_err_handler(
+            @cfunction(ucp_err_handler, Cvoid, (Ptr{Cvoid}, API.ucp_ep_h, API.ucs_status_t)),
+            C_NULL
+        )
 
-    # TODO: Error callback
+        set!(params, :err_mode, API.UCP_ERR_HANDLING_MODE_PEER)
+        set!(params, :err_handler, err_handler)
+    end
 
     @check API.ucp_ep_create(worker, params, r_handle)
 
