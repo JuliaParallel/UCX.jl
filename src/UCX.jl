@@ -123,7 +123,7 @@ end
 
 macro spawn_showerr(ex)
     esc(quote
-        Base.Threads.@spawn try
+        Threads.@spawn try
             $ex
         catch err
             bt = catch_backtrace()
@@ -340,7 +340,7 @@ mutable struct UCXWorker
             fd = RawFD(-1)
         end
 
-        worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}(), fill(false, Base.Threads.nthreads()), true, progress_mode)
+        worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}(), fill(false, Threads.maxthreadid()), true, progress_mode)
         finalizer(worker) do worker
             worker.open = false
             @assert isempty(worker.inflight)
@@ -383,7 +383,7 @@ and call callbacks.
 Returns `true` if progress was made, `false` if no work was waiting.
 """
 function progress(worker::UCXWorker, allow_yield=true)
-    tid = Base.Threads.threadid()
+    tid = Threads.threadid()
     if worker.in_amhandler[tid]
         @debug """
         UCXWorker is processing a Active Message on this thread
@@ -403,7 +403,7 @@ function fence(worker::UCXWorker)
 end
 
 function lock_am(worker::UCXWorker)
-    tid = Base.Threads.threadid()
+    tid = Threads.threadid()
     if worker.in_amhandler[tid]
         error("UCXWorker already in AMHandler on this thread! Concurrency violation.")
     end
@@ -411,7 +411,7 @@ function lock_am(worker::UCXWorker)
 end
 
 function unlock_am(worker::UCXWorker)
-    tid = Base.Threads.threadid()
+    tid = Threads.threadid()
     if !worker.in_amhandler[tid]
         error("UCXWorker is not in AMHandler on this thread! Concurrency violation.")
     end
