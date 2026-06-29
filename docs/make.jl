@@ -1,10 +1,6 @@
-pushfirst!(LOAD_PATH, joinpath(@__DIR__, "..")) # add UCX to environment stack
-
 using UCX
 using Literate
 using Documenter
-
-DocMeta.setdocmeta!(UCX, :DocTestSetup, :(using UCX); recursive=true)
 
 ##
 # Generate examples
@@ -26,7 +22,7 @@ examples = [title=>joinpath("generated", string(name, ".md")) for (title, name) 
 makedocs(;
     modules=[UCX],
     authors="Valentin Churavy",
-    repo="https://github.com/JuliaParallel/UCX.jl/blob/{commit}{path}#{line}",
+    repo=Remotes.GitHub("JuliaParallel", "UCX.jl"),
     sitename="UCX.jl",
     format=Documenter.HTML(;
         prettyurls=get(ENV, "CI", "false") == "true",
@@ -36,12 +32,11 @@ makedocs(;
     ),
     pages = [
         "Home" => "index.md",
-        "Examples" => examples,
+        # "Examples" => examples,
         "API" => "api.md",
     ],
     doctest = true,
     linkcheck = true,
-    strict = true,
 )
 
 deploydocs(;

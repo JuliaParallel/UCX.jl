@@ -5,33 +5,18 @@ on:
       - main
     tags: "*"
   pull_request:
+
 jobs:
   docs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
-      - uses: julia-actions/setup-julia@v1
+      - uses: actions/checkout@v7
+      - uses: julia-actions/setup-julia@v3
         with:
-          version: "1.6"
-      - name: instantiate docs
-        run: |
-          julia --project=docs -e '
-            using Pkg
-            Pkg.develop(PackageSpec(path=pwd()))
-            Pkg.instantiate()
-            Pkg.build("UCX")
-          '
-      - name: run doctests
-        run: |
-          julia --project=docs -e '
-            using Documenter: DocMeta, doctest
-            using UCX
-            DocMeta.setdocmeta!(UCX, :DocTestSetup, :(using UCX); recursive=true)
-            doctest(UCX)
-          '
-      - name: generate docs
-        run: julia --project=docs docs/make.jl
+          version: "1"
+      - uses: julia-actions/cache@v3
+      - uses: julia-actions/julia-docdeploy@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
