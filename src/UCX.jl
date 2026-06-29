@@ -4,8 +4,16 @@ using Sockets: InetAddr, IPv4, listenany
 using Random
 import FunctionWrappers: FunctionWrapper
 import CEnum
+using Preferences: set_preferences!, delete_preferences!, @load_preference, @has_preference
 
 const PROGRESS_MODE = Ref(:idling)
+
+if @has_preference("libucp")
+    const libucp = @load_preference("libucp")
+else
+    using UCX_jll: UCX_jll
+    const libucp = UCX_jll.libucp
+end
 
 include("api.jl")
 include("ip.jl")
@@ -20,7 +28,7 @@ function __init__()
     # global, not context specific, and is being parsed on library load.
 
     # reinstall signal handlers
-    ccall((:ucs_debug_disable_signals, API.libucs), Cvoid, ())
+    @ccall API.libucp.ucs_debug_disable_signals()::Cvoid
 
     @assert version() >= VersionNumber(API.UCP_API_MAJOR, API.UCP_API_MINOR)
     mode = get(ENV, "JLUCX_PROGRESS_MODE", "idling")
@@ -36,17 +44,34 @@ function __init__()
     @debug "UCX progress mode" mode
 end
 
-function memzero!(ref::Ref)
-    ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), ref, 0, sizeof(ref))
+"""
+    set_library(libucp=nothing)
+
+Configure UCX.jl to use a specific UCX library by saving the absolute path to
+`libucp` as a preference. Calling the function with no arguments will reset the
+preference to use UCX from the Yggdrasil-provided UCX_jll. This is a
+compile-time preference, so Julia must be restarted for the change to take
+effect.
+"""
+function set_library(libucp=nothing)
+    if isnothing(libucp)
+        delete_preferences!(UCX, "libucp"; force=true)
+        @info "Cleared UCX library preference; UCX.jl will use UCX_jll. Restart Julia for the change to take effect."
+    elseif !isfile(libucp)
+        throw(ArgumentError("libucp not found at $libucp"))
+    else
+        set_preferences!(UCX, "libucp" => abspath(libucp); force=true)
+        @info "Set UCX library preference; restart Julia for the change to take effect." libucp
+    end
 end
 
-Base.@pure function find_field(::Type{T}, fieldname) where T
-    findfirst(f->f === fieldname, fieldnames(T))
+function memzero!(ref::Ref)
+    @ccall memset(ref::Ptr{Cvoid}, 0::Cint, sizeof(ref)::Csize_t)::Ptr{Cvoid}
 end
 
 @inline function unsafe_fieldptr(ref::Ref{T}, fieldname) where T
-    field = find_field(T, fieldname)
-    @assert field !== nothing
+    field = Base.fieldindex(T, fieldname, false)
+    @assert field != 0
     offset = fieldoffset(T, field)
     base_ptr =  Base.unsafe_convert(Ptr{T}, ref)
     ptr = reinterpret(UInt, base_ptr) + offset
