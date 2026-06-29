@@ -18,15 +18,13 @@ mutable struct UvWorkerIdle
         this = new(Libc.malloc(Base._sizeof_uv_idle), Base.ThreadSynchronizer(), worker, true)
         Base.iolock_begin()
         Base.associate_julia_struct(this.handle, this)
-        err = ccall(:uv_idle_init, Cint, (Ptr{Cvoid}, Ptr{Cvoid}),
-            Base.eventloop(), this.handle)
+        err = @ccall uv_idle_init(Base.eventloop()::Ptr{Cvoid}, this.handle::Ptr{Cvoid})::Cint
         if err != 0
             Libc.free(this.handle)
             this.handle = C_NULL
             throw(_UVError("uv_idle_init", err))
         end
-        err = ccall(:uv_idle_start, Cint, (Ptr{Cvoid}, Ptr{Cvoid}),
-            this.handle, @cfunction(idle_callback, Cvoid, (Ptr{Cvoid},)))
+        err = @ccall uv_idle_start(this.handle::Ptr{Cvoid}, @cfunction(idle_callback, Cvoid, (Ptr{Cvoid},))::Ptr{Cvoid})::Cint
         if err != 0
             Libc.free(this.handle)
             this.handle = C_NULL
@@ -47,7 +45,7 @@ function Base.uvfinalize(t::UvWorkerIdle)
             Base.disassociate_julia_struct(t.handle) # not going to call the usual close hooks
             if t.isopen
                 t.isopen = false
-                ccall(:jl_close_uv, Cvoid, (Ptr{Cvoid},), t)
+                @ccall jl_close_uv(t::Ptr{Cvoid})::Cvoid
             end
             t.handle = C_NULL
             notify(t.cond, false)

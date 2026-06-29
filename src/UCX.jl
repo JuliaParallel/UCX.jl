@@ -187,14 +187,14 @@ end
 function Base.parse(::Type{Dict}, config::UCXConfig)
     ptr  = Ref{Ptr{Cchar}}()
     size = Ref{Csize_t}()
-    fd   = ccall(:open_memstream, Ptr{API.FILE}, (Ptr{Ptr{Cchar}}, Ptr{Csize_t}), ptr, size)
+    fd   = @ccall open_memstream(ptr::Ptr{Ptr{Cchar}}, size::Ptr{Csize_t})::Ptr{API.FILE}
 
     # Flush the just created fd to have `ptr` be valid
-    systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
+    systemerror("fflush", @ccall(fflush(fd::Ptr{API.FILE})::Cint) != 0)
 
     try
         API.ucp_config_print(config, fd, C_NULL, API.UCS_CONFIG_PRINT_CONFIG)
-        systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
+        systemerror("fclose", @ccall(fclose(fd::Ptr{API.FILE})::Cint) != 0)
     catch
         Base.Libc.free(ptr[])
         rethrow()
@@ -274,14 +274,14 @@ Base.unsafe_convert(::Type{API.ucp_context_h}, ctx::UCXContext) = ctx.handle
 function info(ucx::UCXContext)
     ptr  = Ref{Ptr{Cchar}}()
     size = Ref{Csize_t}()
-    fd   = ccall(:open_memstream, Ptr{API.FILE}, (Ptr{Ptr{Cchar}}, Ptr{Csize_t}), ptr, size)
+    fd   = @ccall open_memstream(ptr::Ptr{Ptr{Cchar}}, size::Ptr{Csize_t})::Ptr{API.FILE}
 
     # Flush the just created fd to have `ptr` be valid
-    systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
+    systemerror("fflush", @ccall(fflush(fd::Ptr{API.FILE})::Cint) != 0)
 
     try
         API.ucp_context_print_info(ucx, fd)
-        systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
+        systemerror("fclose", @ccall(fclose(fd::Ptr{API.FILE})::Cint) != 0)
     catch
         Base.Libc.free(ptr[])
         rethrow()
@@ -459,7 +459,7 @@ function Base.wait(worker::UCXWorker)
             # Temporary solution before we have gc transition support in codegen.
             # XXX: `yield()` is supposed to be a safepoint, but without this we easily
             #      deadlock in a multithreaded test.
-            ccall(:jl_gc_safepoint, Cvoid, ())
+            @ccall jl_gc_safepoint()::Cvoid
             yield()
             progress(worker)
         end
