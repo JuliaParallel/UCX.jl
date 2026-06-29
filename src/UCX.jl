@@ -940,15 +940,15 @@ end
 
     param = Ref{API.ucp_request_param_t}()
     memzero!(param)
-    set!(param, :op_attr_mask, attr_mask)
     GC.@preserve param begin
-        ptr = unsafe_fieldptr(param, :cb)
-        Base.setproperty!(ptr, name, cb)
-    end
-    set!(param, :datatype,     dt)
-    set!(param, :user_data,    Base.pointer_from_objref(request))
-    if flags !== nothing
-        set!(param, :flags,    flags)
+        ptr = Base.unsafe_convert(Ptr{API.ucp_request_param_t}, param)
+        ptr.op_attr_mask = attr_mask
+        Base.setproperty!(ptr.cb, name, cb)
+        ptr.datatype     = dt
+        ptr.user_data    = Base.pointer_from_objref(request)
+        if flags !== nothing
+            ptr.flags    = flags
+        end
     end
 
     param
