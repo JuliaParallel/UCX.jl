@@ -1,11 +1,18 @@
 module UCX
 
 using Sockets: InetAddr, IPv4, listenany
-using Random
-import FunctionWrappers: FunctionWrapper
-import CEnum
+using FunctionWrappers: FunctionWrapper
+using CEnum: CEnum
+using Preferences: set_preferences!, delete_preferences!, @load_preference, @has_preference
 
 const PROGRESS_MODE = Ref(:idling)
+
+if @has_preference("libucp")
+    const libucp = @load_preference("libucp")
+else
+    using UCX_jll: UCX_jll
+    const libucp = UCX_jll.libucp
+end
 
 include("api.jl")
 include("ip.jl")
@@ -20,7 +27,7 @@ function __init__()
     # global, not context specific, and is being parsed on library load.
 
     # reinstall signal handlers
-    ccall((:ucs_debug_disable_signals, API.libucs), Cvoid, ())
+    @ccall API.libucp.ucs_debug_disable_signals()::Cvoid
 
     @assert version() >= VersionNumber(API.UCP_API_MAJOR, API.UCP_API_MINOR)
     mode = get(ENV, "JLUCX_PROGRESS_MODE", "idling")
@@ -36,17 +43,34 @@ function __init__()
     @debug "UCX progress mode" mode
 end
 
-function memzero!(ref::Ref)
-    ccall(:memset, Ptr{Cvoid}, (Ptr{Cvoid}, Cint, Csize_t), ref, 0, sizeof(ref))
+"""
+    set_library(libucp=nothing)
+
+Configure UCX.jl to use a specific UCX library by saving the absolute path to
+`libucp` as a preference. Calling the function with no arguments will reset the
+preference to use UCX from the Yggdrasil-provided UCX_jll. This is a
+compile-time preference, so Julia must be restarted for the change to take
+effect.
+"""
+function set_library(libucp=nothing)
+    if isnothing(libucp)
+        delete_preferences!(UCX, "libucp"; force=true)
+        @info "Cleared UCX library preference; UCX.jl will use UCX_jll. Restart Julia for the change to take effect."
+    elseif !isfile(libucp)
+        throw(ArgumentError("libucp not found at $libucp"))
+    else
+        set_preferences!(UCX, "libucp" => abspath(libucp); force=true)
+        @info "Set UCX library preference; restart Julia for the change to take effect." libucp
+    end
 end
 
-Base.@pure function find_field(::Type{T}, fieldname) where T
-    findfirst(f->f === fieldname, fieldnames(T))
+function memzero!(ref::Ref)
+    @ccall memset(ref::Ptr{Cvoid}, 0::Cint, sizeof(ref)::Csize_t)::Ptr{Cvoid}
 end
 
 @inline function unsafe_fieldptr(ref::Ref{T}, fieldname) where T
-    field = find_field(T, fieldname)
-    @assert field !== nothing
+    field = Base.fieldindex(T, fieldname, false)
+    @assert field != 0
     offset = fieldoffset(T, field)
     base_ptr =  Base.unsafe_convert(Ptr{T}, ref)
     ptr = reinterpret(UInt, base_ptr) + offset
@@ -98,7 +122,7 @@ end
 
 macro spawn_showerr(ex)
     esc(quote
-        Base.Threads.@spawn try
+        Threads.@spawn try
             $ex
         catch err
             bt = catch_backtrace()
@@ -162,14 +186,14 @@ end
 function Base.parse(::Type{Dict}, config::UCXConfig)
     ptr  = Ref{Ptr{Cchar}}()
     size = Ref{Csize_t}()
-    fd   = ccall(:open_memstream, Ptr{API.FILE}, (Ptr{Ptr{Cchar}}, Ptr{Csize_t}), ptr, size)
+    fd   = @ccall open_memstream(ptr::Ptr{Ptr{Cchar}}, size::Ptr{Csize_t})::Ptr{API.FILE}
 
     # Flush the just created fd to have `ptr` be valid
-    systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
+    systemerror("fflush", @ccall(fflush(fd::Ptr{API.FILE})::Cint) != 0)
 
     try
         API.ucp_config_print(config, fd, C_NULL, API.UCS_CONFIG_PRINT_CONFIG)
-        systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
+        systemerror("fclose", @ccall(fclose(fd::Ptr{API.FILE})::Cint) != 0)
     catch
         Base.Libc.free(ptr[])
         rethrow()
@@ -249,14 +273,14 @@ Base.unsafe_convert(::Type{API.ucp_context_h}, ctx::UCXContext) = ctx.handle
 function info(ucx::UCXContext)
     ptr  = Ref{Ptr{Cchar}}()
     size = Ref{Csize_t}()
-    fd   = ccall(:open_memstream, Ptr{API.FILE}, (Ptr{Ptr{Cchar}}, Ptr{Csize_t}), ptr, size)
+    fd   = @ccall open_memstream(ptr::Ptr{Ptr{Cchar}}, size::Ptr{Csize_t})::Ptr{API.FILE}
 
     # Flush the just created fd to have `ptr` be valid
-    systemerror("fflush", ccall(:fflush, Cint, (Ptr{API.FILE},), fd) != 0)
+    systemerror("fflush", @ccall(fflush(fd::Ptr{API.FILE})::Cint) != 0)
 
     try
         API.ucp_context_print_info(ucx, fd)
-        systemerror("fclose", ccall(:fclose, Cint, (Ptr{API.FILE},), fd) != 0)
+        systemerror("fclose", @ccall(fclose(fd::Ptr{API.FILE})::Cint) != 0)
     catch
         Base.Libc.free(ptr[])
         rethrow()
@@ -315,7 +339,7 @@ mutable struct UCXWorker
             fd = RawFD(-1)
         end
 
-        worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}(), fill(false, Base.Threads.nthreads()), true, progress_mode)
+        worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}(), fill(false, Threads.maxthreadid()), true, progress_mode)
         finalizer(worker) do worker
             worker.open = false
             @assert isempty(worker.inflight)
@@ -358,7 +382,7 @@ and call callbacks.
 Returns `true` if progress was made, `false` if no work was waiting.
 """
 function progress(worker::UCXWorker, allow_yield=true)
-    tid = Base.Threads.threadid()
+    tid = Threads.threadid()
     if worker.in_amhandler[tid]
         @debug """
         UCXWorker is processing a Active Message on this thread
@@ -378,7 +402,7 @@ function fence(worker::UCXWorker)
 end
 
 function lock_am(worker::UCXWorker)
-    tid = Base.Threads.threadid()
+    tid = Threads.threadid()
     if worker.in_amhandler[tid]
         error("UCXWorker already in AMHandler on this thread! Concurrency violation.")
     end
@@ -386,7 +410,7 @@ function lock_am(worker::UCXWorker)
 end
 
 function unlock_am(worker::UCXWorker)
-    tid = Base.Threads.threadid()
+    tid = Threads.threadid()
     if !worker.in_amhandler[tid]
         error("UCXWorker is not in AMHandler on this thread! Concurrency violation.")
     end
@@ -395,7 +419,7 @@ end
 
 include("idle.jl")
 
-import FileWatching: poll_fd
+using FileWatching: poll_fd
 function Base.wait(worker::UCXWorker)
     if ispolling(worker)
         @assert progress_mode(worker) === :polling
@@ -434,7 +458,7 @@ function Base.wait(worker::UCXWorker)
             # Temporary solution before we have gc transition support in codegen.
             # XXX: `yield()` is supposed to be a safepoint, but without this we easily
             #      deadlock in a multithreaded test.
-            ccall(:jl_gc_safepoint, Cvoid, ())
+            @ccall jl_gc_safepoint()::Cvoid
             yield()
             progress(worker)
         end
@@ -916,15 +940,15 @@ end
 
     param = Ref{API.ucp_request_param_t}()
     memzero!(param)
-    set!(param, :op_attr_mask, attr_mask)
     GC.@preserve param begin
-        ptr = unsafe_fieldptr(param, :cb)
-        Base.setproperty!(ptr, name, cb)
-    end
-    set!(param, :datatype,     dt)
-    set!(param, :user_data,    Base.pointer_from_objref(request))
-    if flags !== nothing
-        set!(param, :flags,    flags)
+        ptr = Base.unsafe_convert(Ptr{API.ucp_request_param_t}, param)
+        ptr.op_attr_mask = attr_mask
+        Base.setproperty!(ptr.cb, name, cb)
+        ptr.datatype     = dt
+        ptr.user_data    = Base.pointer_from_objref(request)
+        if flags !== nothing
+            ptr.flags    = flags
+        end
     end
 
     param
@@ -1053,8 +1077,7 @@ end
 ## RMA
 
 
-import Base.get!
-function get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+function Base.get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
     param = request_param(dt, request, (cb, :send))
@@ -1063,7 +1086,7 @@ function get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     return handle_request(request, ptr)
 end
 
-function get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+function Base.get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     request = UCXRequest(ep, buffer) # rooted through ep.worker
     GC.@preserve buffer begin
         data = pointer(buffer)
@@ -1071,7 +1094,7 @@ function get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     end
 end
 
-function get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+function Base.get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
     request = UCXRequest(ep, ref) # rooted through ep.worker
     GC.@preserve ref begin
         data = Base.unsafe_convert(Ptr{Cvoid}, ref)
@@ -1080,8 +1103,7 @@ function get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
 end
 
 
-import Base.put!
-function put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+function Base.put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
     param = request_param(dt, request, (cb, :send))
@@ -1090,7 +1112,7 @@ function put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     return handle_request(request, ptr)
 end
 
-function put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+function Base.put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     request = UCXRequest(ep, buffer) # rooted through ep.worker
     GC.@preserve buffer begin
         data = pointer(buffer)
@@ -1098,7 +1120,7 @@ function put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     end
 end
 
-function put!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+function Base.put!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
     request = UCXRequest(ep, ref) # rooted through ep.worker
     GC.@preserve ref begin
         data = Base.unsafe_convert(Ptr{Cvoid}, ref)

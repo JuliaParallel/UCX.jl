@@ -1,9 +1,9 @@
 module API
 
-using CEnum
+using CEnum: CEnum, @cenum
 
 
-include(joinpath(@__DIR__, "..", "deps", "deps.jl"))
+using ..UCX: libucp
 
 const FILE = Base.Libc.FILE
 const __socklen_t = Cuint
@@ -70,8 +70,12 @@ const ucp_datatype_t = UInt64
     UCS_MEMORY_TYPE_CUDA_MANAGED = 2
     UCS_MEMORY_TYPE_ROCM = 3
     UCS_MEMORY_TYPE_ROCM_MANAGED = 4
-    UCS_MEMORY_TYPE_LAST = 5
-    UCS_MEMORY_TYPE_UNKNOWN = 5
+    UCS_MEMORY_TYPE_RDMA = 5
+    UCS_MEMORY_TYPE_ZE_HOST = 6
+    UCS_MEMORY_TYPE_ZE_DEVICE = 7
+    UCS_MEMORY_TYPE_ZE_MANAGED = 8
+    UCS_MEMORY_TYPE_LAST = 9
+    UCS_MEMORY_TYPE_UNKNOWN = 9
 end
 
 const ucs_memory_type_t = ucs_memory_type
@@ -79,7 +83,7 @@ const ucs_memory_type_t = ucs_memory_type
 const ucs_status_ptr_t = Ptr{Cvoid}
 
 function ucs_status_string(status)
-    ccall((:ucs_status_string, libucp), Ptr{Cchar}, (ucs_status_t,), status)
+    @ccall libucp.ucs_status_string(status::ucs_status_t)::Ptr{Cchar}
 end
 
 @cenum ucs_log_level_t::UInt32 begin
@@ -141,6 +145,14 @@ end
     UCS_CONFIG_PRINT_DOC = 4
     UCS_CONFIG_PRINT_HIDDEN = 8
     UCS_CONFIG_PRINT_COMMENT_DEFAULT = 16
+end
+
+function ucs_ternary_auto_value_is_yes_or_try(value)
+    @ccall libucp.ucs_ternary_auto_value_is_yes_or_try(value::ucs_ternary_auto_value_t)::Cint
+end
+
+function ucs_ternary_auto_value_is_yes_or_no(value)
+    @ccall libucp.ucs_ternary_auto_value_is_yes_or_no(value::ucs_ternary_auto_value_t)::Cint
 end
 
 struct ucs_config_names_array_t
@@ -329,9 +341,25 @@ struct ucp_ep_params
     sockaddr::ucs_sock_addr_t
     conn_request::ucp_conn_request_h
     name::Ptr{Cchar}
+    local_sockaddr::ucs_sock_addr_t
 end
 
 const ucp_ep_params_t = ucp_ep_params
+
+struct ucp_transport_entry_t
+    transport_name::Ptr{Cchar}
+    device_name::Ptr{Cchar}
+end
+
+struct ucp_transports_t
+    entries::Ptr{ucp_transport_entry_t}
+    num_entries::Cuint
+    entry_size::Csize_t
+end
+
+mutable struct ucp_device_mem_list_handle end
+
+const ucp_device_mem_list_handle_h = Ptr{ucp_device_mem_list_handle}
 
 struct ucp_listener_accept_handler
     cb::ucp_listener_accept_callback_t
@@ -341,75 +369,190 @@ end
 const ucp_listener_accept_handler_t = ucp_listener_accept_handler
 
 function ucp_request_is_completed(request)
-    ccall((:ucp_request_is_completed, libucp), Cint, (Ptr{Cvoid},), request)
+    @ccall libucp.ucp_request_is_completed(request::Ptr{Cvoid})::Cint
 end
 
 function ucp_request_release(request)
-    ccall((:ucp_request_release, libucp), Cvoid, (Ptr{Cvoid},), request)
+    @ccall libucp.ucp_request_release(request::Ptr{Cvoid})::Cvoid
 end
 
 function ucp_ep_destroy(ep)
-    ccall((:ucp_ep_destroy, libucp), Cvoid, (ucp_ep_h,), ep)
+    @ccall libucp.ucp_ep_destroy(ep::ucp_ep_h)::Cvoid
 end
 
 function ucp_disconnect_nb(ep)
-    ccall((:ucp_disconnect_nb, libucp), ucs_status_ptr_t, (ucp_ep_h,), ep)
+    @ccall libucp.ucp_disconnect_nb(ep::ucp_ep_h)::ucs_status_ptr_t
+end
+
+function ucp_request_alloc(worker)
+    @ccall libucp.ucp_request_alloc(worker::ucp_worker_h)::Ptr{Cvoid}
 end
 
 function ucp_request_test(request, info)
-    ccall((:ucp_request_test, libucp), ucs_status_t, (Ptr{Cvoid}, Ptr{ucp_tag_recv_info_t}), request, info)
+    @ccall libucp.ucp_request_test(request::Ptr{Cvoid}, info::Ptr{ucp_tag_recv_info_t})::ucs_status_t
+end
+
+function ucp_rkey_pack(context, memh, rkey_buffer_p, size_p)
+    @ccall libucp.ucp_rkey_pack(context::ucp_context_h, memh::ucp_mem_h, rkey_buffer_p::Ptr{Ptr{Cvoid}}, size_p::Ptr{Csize_t})::ucs_status_t
+end
+
+function ucp_rkey_buffer_release(rkey_buffer)
+    @ccall libucp.ucp_rkey_buffer_release(rkey_buffer::Ptr{Cvoid})::Cvoid
 end
 
 function ucp_ep_flush(ep)
-    ccall((:ucp_ep_flush, libucp), ucs_status_t, (ucp_ep_h,), ep)
+    @ccall libucp.ucp_ep_flush(ep::ucp_ep_h)::ucs_status_t
 end
 
 function ucp_worker_flush(worker)
-    ccall((:ucp_worker_flush, libucp), ucs_status_t, (ucp_worker_h,), worker)
+    @ccall libucp.ucp_worker_flush(worker::ucp_worker_h)::ucs_status_t
 end
 
 function ucp_put(ep, buffer, length, remote_addr, rkey)
-    ccall((:ucp_put, libucp), ucs_status_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h), ep, buffer, length, remote_addr, rkey)
+    @ccall libucp.ucp_put(ep::ucp_ep_h, buffer::Ptr{Cvoid}, length::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h)::ucs_status_t
 end
 
 function ucp_get(ep, buffer, length, remote_addr, rkey)
-    ccall((:ucp_get, libucp), ucs_status_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h), ep, buffer, length, remote_addr, rkey)
+    @ccall libucp.ucp_get(ep::ucp_ep_h, buffer::Ptr{Cvoid}, length::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h)::ucs_status_t
 end
 
 function ucp_atomic_add32(ep, add, remote_addr, rkey)
-    ccall((:ucp_atomic_add32, libucp), ucs_status_t, (ucp_ep_h, UInt32, UInt64, ucp_rkey_h), ep, add, remote_addr, rkey)
+    @ccall libucp.ucp_atomic_add32(ep::ucp_ep_h, add::UInt32, remote_addr::UInt64, rkey::ucp_rkey_h)::ucs_status_t
 end
 
 function ucp_atomic_add64(ep, add, remote_addr, rkey)
-    ccall((:ucp_atomic_add64, libucp), ucs_status_t, (ucp_ep_h, UInt64, UInt64, ucp_rkey_h), ep, add, remote_addr, rkey)
+    @ccall libucp.ucp_atomic_add64(ep::ucp_ep_h, add::UInt64, remote_addr::UInt64, rkey::ucp_rkey_h)::ucs_status_t
 end
 
 function ucp_atomic_fadd32(ep, add, remote_addr, rkey, result)
-    ccall((:ucp_atomic_fadd32, libucp), ucs_status_t, (ucp_ep_h, UInt32, UInt64, ucp_rkey_h, Ptr{UInt32}), ep, add, remote_addr, rkey, result)
+    @ccall libucp.ucp_atomic_fadd32(ep::ucp_ep_h, add::UInt32, remote_addr::UInt64, rkey::ucp_rkey_h, result::Ptr{UInt32})::ucs_status_t
 end
 
 function ucp_atomic_fadd64(ep, add, remote_addr, rkey, result)
-    ccall((:ucp_atomic_fadd64, libucp), ucs_status_t, (ucp_ep_h, UInt64, UInt64, ucp_rkey_h, Ptr{UInt64}), ep, add, remote_addr, rkey, result)
+    @ccall libucp.ucp_atomic_fadd64(ep::ucp_ep_h, add::UInt64, remote_addr::UInt64, rkey::ucp_rkey_h, result::Ptr{UInt64})::ucs_status_t
 end
 
 function ucp_atomic_swap32(ep, swap, remote_addr, rkey, result)
-    ccall((:ucp_atomic_swap32, libucp), ucs_status_t, (ucp_ep_h, UInt32, UInt64, ucp_rkey_h, Ptr{UInt32}), ep, swap, remote_addr, rkey, result)
+    @ccall libucp.ucp_atomic_swap32(ep::ucp_ep_h, swap::UInt32, remote_addr::UInt64, rkey::ucp_rkey_h, result::Ptr{UInt32})::ucs_status_t
 end
 
 function ucp_atomic_swap64(ep, swap, remote_addr, rkey, result)
-    ccall((:ucp_atomic_swap64, libucp), ucs_status_t, (ucp_ep_h, UInt64, UInt64, ucp_rkey_h, Ptr{UInt64}), ep, swap, remote_addr, rkey, result)
+    @ccall libucp.ucp_atomic_swap64(ep::ucp_ep_h, swap::UInt64, remote_addr::UInt64, rkey::ucp_rkey_h, result::Ptr{UInt64})::ucs_status_t
 end
 
 function ucp_atomic_cswap32(ep, compare, swap, remote_addr, rkey, result)
-    ccall((:ucp_atomic_cswap32, libucp), ucs_status_t, (ucp_ep_h, UInt32, UInt32, UInt64, ucp_rkey_h, Ptr{UInt32}), ep, compare, swap, remote_addr, rkey, result)
+    @ccall libucp.ucp_atomic_cswap32(ep::ucp_ep_h, compare::UInt32, swap::UInt32, remote_addr::UInt64, rkey::ucp_rkey_h, result::Ptr{UInt32})::ucs_status_t
 end
 
 function ucp_atomic_cswap64(ep, compare, swap, remote_addr, rkey, result)
-    ccall((:ucp_atomic_cswap64, libucp), ucs_status_t, (ucp_ep_h, UInt64, UInt64, UInt64, ucp_rkey_h, Ptr{UInt64}), ep, compare, swap, remote_addr, rkey, result)
+    @ccall libucp.ucp_atomic_cswap64(ep::ucp_ep_h, compare::UInt64, swap::UInt64, remote_addr::UInt64, rkey::ucp_rkey_h, result::Ptr{UInt64})::ucs_status_t
 end
 
 function ucp_ep_modify_nb(ep, params)
-    ccall((:ucp_ep_modify_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{ucp_ep_params_t}), ep, params)
+    @ccall libucp.ucp_ep_modify_nb(ep::ucp_ep_h, params::Ptr{ucp_ep_params_t})::ucs_status_ptr_t
+end
+
+function ucp_worker_get_address(worker, address_p, address_length_p)
+    @ccall libucp.ucp_worker_get_address(worker::ucp_worker_h, address_p::Ptr{Ptr{ucp_address_t}}, address_length_p::Ptr{Csize_t})::ucs_status_t
+end
+
+function ucp_ep_close_nb(ep, mode)
+    @ccall libucp.ucp_ep_close_nb(ep::ucp_ep_h, mode::Cuint)::ucs_status_ptr_t
+end
+
+function ucp_ep_flush_nb(ep, flags, cb)
+    @ccall libucp.ucp_ep_flush_nb(ep::ucp_ep_h, flags::Cuint, cb::ucp_send_callback_t)::ucs_status_ptr_t
+end
+
+function ucp_worker_set_am_handler(worker, id, cb, arg, flags)
+    @ccall libucp.ucp_worker_set_am_handler(worker::ucp_worker_h, id::UInt16, cb::ucp_am_callback_t, arg::Ptr{Cvoid}, flags::UInt32)::ucs_status_t
+end
+
+function ucp_am_send_nb(ep, id, buffer, count, datatype, cb, flags)
+    @ccall libucp.ucp_am_send_nb(ep::ucp_ep_h, id::UInt16, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, cb::ucp_send_callback_t, flags::Cuint)::ucs_status_ptr_t
+end
+
+function ucp_stream_send_nb(ep, buffer, count, datatype, cb, flags)
+    @ccall libucp.ucp_stream_send_nb(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, cb::ucp_send_callback_t, flags::Cuint)::ucs_status_ptr_t
+end
+
+function ucp_stream_recv_nb(ep, buffer, count, datatype, cb, length, flags)
+    @ccall libucp.ucp_stream_recv_nb(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, cb::ucp_stream_recv_callback_t, length::Ptr{Csize_t}, flags::Cuint)::ucs_status_ptr_t
+end
+
+function ucp_tag_send_nb(ep, buffer, count, datatype, tag, cb)
+    @ccall libucp.ucp_tag_send_nb(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, tag::ucp_tag_t, cb::ucp_send_callback_t)::ucs_status_ptr_t
+end
+
+function ucp_tag_send_nbr(ep, buffer, count, datatype, tag, req)
+    @ccall libucp.ucp_tag_send_nbr(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, tag::ucp_tag_t, req::Ptr{Cvoid})::ucs_status_t
+end
+
+function ucp_tag_send_sync_nb(ep, buffer, count, datatype, tag, cb)
+    @ccall libucp.ucp_tag_send_sync_nb(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, tag::ucp_tag_t, cb::ucp_send_callback_t)::ucs_status_ptr_t
+end
+
+function ucp_tag_recv_nb(worker, buffer, count, datatype, tag, tag_mask, cb)
+    @ccall libucp.ucp_tag_recv_nb(worker::ucp_worker_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, tag::ucp_tag_t, tag_mask::ucp_tag_t, cb::ucp_tag_recv_callback_t)::ucs_status_ptr_t
+end
+
+function ucp_tag_recv_nbr(worker, buffer, count, datatype, tag, tag_mask, req)
+    @ccall libucp.ucp_tag_recv_nbr(worker::ucp_worker_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, tag::ucp_tag_t, tag_mask::ucp_tag_t, req::Ptr{Cvoid})::ucs_status_t
+end
+
+function ucp_tag_msg_recv_nb(worker, buffer, count, datatype, message, cb)
+    @ccall libucp.ucp_tag_msg_recv_nb(worker::ucp_worker_h, buffer::Ptr{Cvoid}, count::Csize_t, datatype::ucp_datatype_t, message::ucp_tag_message_h, cb::ucp_tag_recv_callback_t)::ucs_status_ptr_t
+end
+
+function ucp_put_nbi(ep, buffer, length, remote_addr, rkey)
+    @ccall libucp.ucp_put_nbi(ep::ucp_ep_h, buffer::Ptr{Cvoid}, length::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h)::ucs_status_t
+end
+
+function ucp_put_nb(ep, buffer, length, remote_addr, rkey, cb)
+    @ccall libucp.ucp_put_nb(ep::ucp_ep_h, buffer::Ptr{Cvoid}, length::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h, cb::ucp_send_callback_t)::ucs_status_ptr_t
+end
+
+function ucp_get_nbi(ep, buffer, length, remote_addr, rkey)
+    @ccall libucp.ucp_get_nbi(ep::ucp_ep_h, buffer::Ptr{Cvoid}, length::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h)::ucs_status_t
+end
+
+function ucp_get_nb(ep, buffer, length, remote_addr, rkey, cb)
+    @ccall libucp.ucp_get_nb(ep::ucp_ep_h, buffer::Ptr{Cvoid}, length::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h, cb::ucp_send_callback_t)::ucs_status_ptr_t
+end
+
+@cenum ucp_atomic_post_op_t::UInt32 begin
+    UCP_ATOMIC_POST_OP_ADD = 0
+    UCP_ATOMIC_POST_OP_AND = 1
+    UCP_ATOMIC_POST_OP_OR = 2
+    UCP_ATOMIC_POST_OP_XOR = 3
+    UCP_ATOMIC_POST_OP_LAST = 4
+end
+
+function ucp_atomic_post(ep, opcode, value, op_size, remote_addr, rkey)
+    @ccall libucp.ucp_atomic_post(ep::ucp_ep_h, opcode::ucp_atomic_post_op_t, value::UInt64, op_size::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h)::ucs_status_t
+end
+
+@cenum ucp_atomic_fetch_op_t::UInt32 begin
+    UCP_ATOMIC_FETCH_OP_FADD = 0
+    UCP_ATOMIC_FETCH_OP_SWAP = 1
+    UCP_ATOMIC_FETCH_OP_CSWAP = 2
+    UCP_ATOMIC_FETCH_OP_FAND = 3
+    UCP_ATOMIC_FETCH_OP_FOR = 4
+    UCP_ATOMIC_FETCH_OP_FXOR = 5
+    UCP_ATOMIC_FETCH_OP_LAST = 6
+end
+
+function ucp_atomic_fetch_nb(ep, opcode, value, result, op_size, remote_addr, rkey, cb)
+    @ccall libucp.ucp_atomic_fetch_nb(ep::ucp_ep_h, opcode::ucp_atomic_fetch_op_t, value::UInt64, result::Ptr{Cvoid}, op_size::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h, cb::ucp_send_callback_t)::ucs_status_ptr_t
+end
+
+function ucp_worker_flush_nb(worker, flags, cb)
+    @ccall libucp.ucp_worker_flush_nb(worker::ucp_worker_h, flags::Cuint, cb::ucp_send_callback_t)::ucs_status_ptr_t
+end
+
+@cenum ucp_ep_close_mode::UInt32 begin
+    UCP_EP_CLOSE_MODE_FORCE = 0
+    UCP_EP_CLOSE_MODE_FLUSH = 1
 end
 
 @cenum ucs_thread_mode_t::UInt32 begin
@@ -420,11 +563,11 @@ end
 end
 
 function ucs_cpu_is_set(cpu, cpusetp)
-    ccall((:ucs_cpu_is_set, libucp), Cint, (Cint, Ptr{ucs_cpu_set_t}), cpu, cpusetp)
+    @ccall libucp.ucs_cpu_is_set(cpu::Cint, cpusetp::Ptr{ucs_cpu_set_t})::Cint
 end
 
 function ucs_cpu_set_find_lcs(cpu_mask)
-    ccall((:ucs_cpu_set_find_lcs, libucp), Cint, (Ptr{ucs_cpu_set_t},), cpu_mask)
+    @ccall libucp.ucs_cpu_set_find_lcs(cpu_mask::Ptr{ucs_cpu_set_t})::Cint
 end
 
 @cenum ucp_params_field::UInt32 begin
@@ -437,6 +580,7 @@ end
     UCP_PARAM_FIELD_ESTIMATED_NUM_EPS = 64
     UCP_PARAM_FIELD_ESTIMATED_NUM_PPN = 128
     UCP_PARAM_FIELD_NAME = 256
+    UCP_PARAM_FIELD_NODE_LOCAL_ID = 512
 end
 
 @cenum ucp_feature::UInt32 begin
@@ -447,6 +591,8 @@ end
     UCP_FEATURE_WAKEUP = 16
     UCP_FEATURE_STREAM = 32
     UCP_FEATURE_AM = 64
+    UCP_FEATURE_EXPORTED_MEMH = 128
+    UCP_FEATURE_DEVICE = 256
 end
 
 @cenum ucp_worker_params_field::UInt32 begin
@@ -457,6 +603,8 @@ end
     UCP_WORKER_PARAM_FIELD_EVENT_FD = 16
     UCP_WORKER_PARAM_FIELD_FLAGS = 32
     UCP_WORKER_PARAM_FIELD_NAME = 64
+    UCP_WORKER_PARAM_FIELD_AM_ALIGNMENT = 128
+    UCP_WORKER_PARAM_FIELD_CLIENT_ID = 256
 end
 
 @cenum ucp_worker_flags_t::UInt32 begin
@@ -482,20 +630,17 @@ end
     UCP_EP_PARAM_FIELD_FLAGS = 32
     UCP_EP_PARAM_FIELD_CONN_REQUEST = 64
     UCP_EP_PARAM_FIELD_NAME = 128
+    UCP_EP_PARAM_FIELD_LOCAL_SOCK_ADDR = 256
 end
 
 @cenum ucp_ep_params_flags_field::UInt32 begin
     UCP_EP_PARAMS_FLAGS_CLIENT_SERVER = 1
     UCP_EP_PARAMS_FLAGS_NO_LOOPBACK = 2
+    UCP_EP_PARAMS_FLAGS_SEND_CLIENT_ID = 4
 end
 
 @cenum ucp_ep_close_flags_t::UInt32 begin
     UCP_EP_CLOSE_FLAG_FORCE = 1
-end
-
-@cenum ucp_ep_close_mode::UInt32 begin
-    UCP_EP_CLOSE_MODE_FORCE = 0
-    UCP_EP_CLOSE_MODE_FLUSH = 1
 end
 
 @cenum ucp_ep_perf_param_field::UInt32 begin
@@ -516,6 +661,7 @@ const ucp_ep_perf_attr_field_t = ucp_ep_perf_attr_field
     UCP_MEM_MAP_PARAM_FIELD_FLAGS = 4
     UCP_MEM_MAP_PARAM_FIELD_PROT = 8
     UCP_MEM_MAP_PARAM_FIELD_MEMORY_TYPE = 16
+    UCP_MEM_MAP_PARAM_FIELD_EXPORTED_MEMH_BUFFER = 32
 end
 
 @cenum ucp_mem_advise_params_field::UInt32 begin
@@ -533,6 +679,7 @@ end
     UCP_ATTR_FIELD_THREAD_MODE = 2
     UCP_ATTR_FIELD_MEMORY_TYPES = 4
     UCP_ATTR_FIELD_NAME = 8
+    UCP_ATTR_FIELD_DEVICE_COUNTER_SIZE = 16
 end
 
 @cenum ucp_worker_attr_field::UInt32 begin
@@ -544,12 +691,17 @@ end
     UCP_WORKER_ATTR_FIELD_MAX_INFO_STRING = 32
 end
 
+@cenum ucp_worker_address_attr_field::UInt32 begin
+    UCP_WORKER_ADDRESS_ATTR_FIELD_UID = 1
+end
+
 @cenum ucp_listener_attr_field::UInt32 begin
     UCP_LISTENER_ATTR_FIELD_SOCKADDR = 1
 end
 
 @cenum ucp_conn_request_attr_field::UInt32 begin
     UCP_CONN_REQUEST_ATTR_FIELD_CLIENT_ADDR = 1
+    UCP_CONN_REQUEST_ATTR_FIELD_CLIENT_ID = 2
 end
 
 @cenum ucp_dt_type::UInt32 begin
@@ -561,13 +713,21 @@ end
     UCP_DATATYPE_CLASS_MASK = 7
 end
 
-@cenum __JL_Ctag_34::UInt32 begin
+@cenum ucp_datatype_attr_field::UInt32 begin
+    UCP_DATATYPE_ATTR_FIELD_PACKED_SIZE = 1
+    UCP_DATATYPE_ATTR_FIELD_BUFFER = 2
+    UCP_DATATYPE_ATTR_FIELD_COUNT = 4
+end
+
+@cenum __JL_Ctag_4::UInt32 begin
     UCP_MEM_MAP_NONBLOCK = 1
     UCP_MEM_MAP_ALLOCATE = 2
     UCP_MEM_MAP_FIXED = 4
+    UCP_MEM_MAP_SYMMETRIC_RKEY = 8
+    UCP_MEM_MAP_LOCK = 16
 end
 
-@cenum __JL_Ctag_35::UInt32 begin
+@cenum __JL_Ctag_5::UInt32 begin
     UCP_MEM_MAP_PROT_LOCAL_READ = 1
     UCP_MEM_MAP_PROT_LOCAL_WRITE = 2
     UCP_MEM_MAP_PROT_REMOTE_READ = 256
@@ -583,29 +743,12 @@ end
     UCP_AM_SEND_FLAG_REPLY = 1
     UCP_AM_SEND_FLAG_EAGER = 2
     UCP_AM_SEND_FLAG_RNDV = 4
+    UCP_AM_SEND_FLAG_COPY_HEADER = 8
     UCP_AM_SEND_REPLY = 1
 end
 
 @cenum ucp_cb_param_flags::UInt32 begin
     UCP_CB_PARAM_FLAG_DATA = 1
-end
-
-@cenum ucp_atomic_post_op_t::UInt32 begin
-    UCP_ATOMIC_POST_OP_ADD = 0
-    UCP_ATOMIC_POST_OP_AND = 1
-    UCP_ATOMIC_POST_OP_OR = 2
-    UCP_ATOMIC_POST_OP_XOR = 3
-    UCP_ATOMIC_POST_OP_LAST = 4
-end
-
-@cenum ucp_atomic_fetch_op_t::UInt32 begin
-    UCP_ATOMIC_FETCH_OP_FADD = 0
-    UCP_ATOMIC_FETCH_OP_SWAP = 1
-    UCP_ATOMIC_FETCH_OP_CSWAP = 2
-    UCP_ATOMIC_FETCH_OP_FAND = 3
-    UCP_ATOMIC_FETCH_OP_FOR = 4
-    UCP_ATOMIC_FETCH_OP_FXOR = 5
-    UCP_ATOMIC_FETCH_OP_LAST = 6
 end
 
 @cenum ucp_atomic_op_t::UInt32 begin
@@ -631,9 +774,11 @@ end
     UCP_OP_ATTR_FIELD_REPLY_BUFFER = 32
     UCP_OP_ATTR_FIELD_MEMORY_TYPE = 64
     UCP_OP_ATTR_FIELD_RECV_INFO = 128
+    UCP_OP_ATTR_FIELD_MEMH = 256
     UCP_OP_ATTR_FLAG_NO_IMM_CMPL = 65536
     UCP_OP_ATTR_FLAG_FAST_CMPL = 131072
     UCP_OP_ATTR_FLAG_FORCE_IMM_CMPL = 262144
+    UCP_OP_ATTR_FLAG_MULTI_SEND = 524288
 end
 
 @cenum ucp_req_attr_field::UInt32 begin
@@ -674,6 +819,15 @@ end
 
 const ucp_generic_dt_ops_t = ucp_generic_dt_ops
 
+struct ucp_datatype_attr
+    field_mask::UInt64
+    packed_size::Csize_t
+    buffer::Ptr{Cvoid}
+    count::Csize_t
+end
+
+const ucp_datatype_attr_t = ucp_datatype_attr
+
 struct ucp_params
     field_mask::UInt64
     features::UInt64
@@ -685,6 +839,7 @@ struct ucp_params
     estimated_num_eps::Csize_t
     estimated_num_ppn::Csize_t
     name::Ptr{Cchar}
+    node_local_id::Csize_t
 end
 
 const ucp_params_t = ucp_params
@@ -702,6 +857,7 @@ struct ucp_context_attr
     thread_mode::ucs_thread_mode_t
     memory_types::UInt64
     name::NTuple{32, Cchar}
+    device_counter_size::Csize_t
 end
 
 const ucp_context_attr_t = ucp_context_attr
@@ -719,6 +875,12 @@ end
 
 const ucp_worker_attr_t = ucp_worker_attr
 
+struct ucp_rkey_compare_params
+    field_mask::UInt64
+end
+
+const ucp_rkey_compare_params_t = ucp_rkey_compare_params
+
 struct ucp_worker_params
     field_mask::UInt64
     thread_mode::ucs_thread_mode_t
@@ -728,9 +890,18 @@ struct ucp_worker_params
     event_fd::Cint
     flags::UInt64
     name::Ptr{Cchar}
+    am_alignment::Csize_t
+    client_id::UInt64
 end
 
 const ucp_worker_params_t = ucp_worker_params
+
+struct ucp_worker_address_attr
+    field_mask::UInt64
+    worker_uid::UInt64
+end
+
+const ucp_worker_address_attr_t = ucp_worker_address_attr
 
 struct ucp_ep_evaluate_perf_param_t
     field_mask::UInt64
@@ -758,6 +929,7 @@ const ucp_listener_attr_t = ucp_listener_attr
 struct ucp_conn_request_attr
     field_mask::UInt64
     client_address::sockaddr_storage
+    client_id::UInt64
 end
 
 const ucp_conn_request_attr_t = ucp_conn_request_attr
@@ -787,15 +959,16 @@ struct ucp_mem_map_params
     flags::Cuint
     prot::Cuint
     memory_type::ucs_memory_type_t
+    exported_memh_buffer::Ptr{Cvoid}
 end
 
 const ucp_mem_map_params_t = ucp_mem_map_params
 
-struct __JL_Ctag_47
+struct __JL_Ctag_6
     data::NTuple{8, UInt8}
 end
 
-function Base.getproperty(x::Ptr{__JL_Ctag_47}, f::Symbol)
+function Base.getproperty(x::Ptr{__JL_Ctag_6}, f::Symbol)
     f === :send && return Ptr{ucp_send_nbx_callback_t}(x + 0)
     f === :recv && return Ptr{ucp_tag_recv_nbx_callback_t}(x + 0)
     f === :recv_stream && return Ptr{ucp_stream_recv_nbx_callback_t}(x + 0)
@@ -803,48 +976,89 @@ function Base.getproperty(x::Ptr{__JL_Ctag_47}, f::Symbol)
     return getfield(x, f)
 end
 
-function Base.getproperty(x::__JL_Ctag_47, f::Symbol)
-    r = Ref{__JL_Ctag_47}(x)
-    ptr = Base.unsafe_convert(Ptr{__JL_Ctag_47}, r)
+function Base.getproperty(x::__JL_Ctag_6, f::Symbol)
+    r = Ref{__JL_Ctag_6}(x)
+    ptr = Base.unsafe_convert(Ptr{__JL_Ctag_6}, r)
     fptr = getproperty(ptr, f)
     GC.@preserve r unsafe_load(fptr)
 end
 
-function Base.setproperty!(x::Ptr{__JL_Ctag_47}, f::Symbol, v)
+function Base.setproperty!(x::Ptr{__JL_Ctag_6}, f::Symbol, v)
     unsafe_store!(getproperty(x, f), v)
 end
 
-struct __JL_Ctag_48
+function Base.propertynames(x::__JL_Ctag_6, private::Bool = false)
+    (:send, :recv, :recv_stream, :recv_am, if private
+            fieldnames(typeof(x))
+        else
+            ()
+        end...)
+end
+
+struct __JL_Ctag_7
     data::NTuple{8, UInt8}
 end
 
-function Base.getproperty(x::Ptr{__JL_Ctag_48}, f::Symbol)
+function Base.getproperty(x::Ptr{__JL_Ctag_7}, f::Symbol)
     f === :length && return Ptr{Ptr{Csize_t}}(x + 0)
     f === :tag_info && return Ptr{Ptr{ucp_tag_recv_info_t}}(x + 0)
     return getfield(x, f)
 end
 
-function Base.getproperty(x::__JL_Ctag_48, f::Symbol)
-    r = Ref{__JL_Ctag_48}(x)
-    ptr = Base.unsafe_convert(Ptr{__JL_Ctag_48}, r)
+function Base.getproperty(x::__JL_Ctag_7, f::Symbol)
+    r = Ref{__JL_Ctag_7}(x)
+    ptr = Base.unsafe_convert(Ptr{__JL_Ctag_7}, r)
     fptr = getproperty(ptr, f)
     GC.@preserve r unsafe_load(fptr)
 end
 
-function Base.setproperty!(x::Ptr{__JL_Ctag_48}, f::Symbol, v)
+function Base.setproperty!(x::Ptr{__JL_Ctag_7}, f::Symbol, v)
     unsafe_store!(getproperty(x, f), v)
 end
 
+function Base.propertynames(x::__JL_Ctag_7, private::Bool = false)
+    (:length, :tag_info, if private
+            fieldnames(typeof(x))
+        else
+            ()
+        end...)
+end
+
 struct ucp_request_param_t
-    op_attr_mask::UInt32
-    flags::UInt32
-    request::Ptr{Cvoid}
-    cb::__JL_Ctag_47
-    datatype::ucp_datatype_t
-    user_data::Ptr{Cvoid}
-    reply_buffer::Ptr{Cvoid}
-    memory_type::ucs_memory_type_t
-    recv_info::__JL_Ctag_48
+    data::NTuple{72, UInt8}
+end
+
+function Base.getproperty(x::Ptr{ucp_request_param_t}, f::Symbol)
+    f === :op_attr_mask && return Ptr{UInt32}(x + 0)
+    f === :flags && return Ptr{UInt32}(x + 4)
+    f === :request && return Ptr{Ptr{Cvoid}}(x + 8)
+    f === :cb && return Ptr{__JL_Ctag_6}(x + 16)
+    f === :datatype && return Ptr{ucp_datatype_t}(x + 24)
+    f === :user_data && return Ptr{Ptr{Cvoid}}(x + 32)
+    f === :reply_buffer && return Ptr{Ptr{Cvoid}}(x + 40)
+    f === :memory_type && return Ptr{ucs_memory_type_t}(x + 48)
+    f === :recv_info && return Ptr{__JL_Ctag_7}(x + 56)
+    f === :memh && return Ptr{ucp_mem_h}(x + 64)
+    return getfield(x, f)
+end
+
+function Base.getproperty(x::ucp_request_param_t, f::Symbol)
+    r = Ref{ucp_request_param_t}(x)
+    ptr = Base.unsafe_convert(Ptr{ucp_request_param_t}, r)
+    fptr = getproperty(ptr, f)
+    GC.@preserve r unsafe_load(fptr)
+end
+
+function Base.setproperty!(x::Ptr{ucp_request_param_t}, f::Symbol, v)
+    unsafe_store!(getproperty(x, f), v)
+end
+
+function Base.propertynames(x::ucp_request_param_t, private::Bool = false)
+    (:op_attr_mask, :flags, :request, :cb, :datatype, :user_data, :reply_buffer, :memory_type, :recv_info, :memh, if private
+            fieldnames(typeof(x))
+        else
+            ()
+        end...)
 end
 
 struct ucp_request_attr_t
@@ -866,171 +1080,167 @@ end
 const ucp_am_handler_param_t = ucp_am_handler_param
 
 function ucp_lib_query(attr)
-    ccall((:ucp_lib_query, libucp), ucs_status_t, (Ptr{ucp_lib_attr_t},), attr)
+    @ccall libucp.ucp_lib_query(attr::Ptr{ucp_lib_attr_t})::ucs_status_t
 end
 
 function ucp_config_read(env_prefix, filename, config_p)
-    ccall((:ucp_config_read, libucp), ucs_status_t, (Ptr{Cchar}, Ptr{Cchar}, Ptr{Ptr{ucp_config_t}}), env_prefix, filename, config_p)
+    @ccall libucp.ucp_config_read(env_prefix::Ptr{Cchar}, filename::Ptr{Cchar}, config_p::Ptr{Ptr{ucp_config_t}})::ucs_status_t
 end
 
 function ucp_config_release(config)
-    ccall((:ucp_config_release, libucp), Cvoid, (Ptr{ucp_config_t},), config)
+    @ccall libucp.ucp_config_release(config::Ptr{ucp_config_t})::Cvoid
 end
 
 function ucp_config_modify(config, name, value)
-    ccall((:ucp_config_modify, libucp), ucs_status_t, (Ptr{ucp_config_t}, Ptr{Cchar}, Ptr{Cchar}), config, name, value)
+    @ccall libucp.ucp_config_modify(config::Ptr{ucp_config_t}, name::Ptr{Cchar}, value::Ptr{Cchar})::ucs_status_t
 end
 
 function ucp_config_print(config, stream, title, print_flags)
-    ccall((:ucp_config_print, libucp), Cvoid, (Ptr{ucp_config_t}, Ptr{FILE}, Ptr{Cchar}, ucs_config_print_flags_t), config, stream, title, print_flags)
+    @ccall libucp.ucp_config_print(config::Ptr{ucp_config_t}, stream::Ptr{FILE}, title::Ptr{Cchar}, print_flags::ucs_config_print_flags_t)::Cvoid
 end
 
 function ucp_get_version(major_version, minor_version, release_number)
-    ccall((:ucp_get_version, libucp), Cvoid, (Ptr{Cuint}, Ptr{Cuint}, Ptr{Cuint}), major_version, minor_version, release_number)
+    @ccall libucp.ucp_get_version(major_version::Ptr{Cuint}, minor_version::Ptr{Cuint}, release_number::Ptr{Cuint})::Cvoid
 end
 
 function ucp_get_version_string()
-    ccall((:ucp_get_version_string, libucp), Ptr{Cchar}, ())
+    @ccall libucp.ucp_get_version_string()::Ptr{Cchar}
 end
 
 function ucp_init_version(api_major_version, api_minor_version, params, config, context_p)
-    ccall((:ucp_init_version, libucp), ucs_status_t, (Cuint, Cuint, Ptr{ucp_params_t}, Ptr{ucp_config_t}, Ptr{ucp_context_h}), api_major_version, api_minor_version, params, config, context_p)
+    @ccall libucp.ucp_init_version(api_major_version::Cuint, api_minor_version::Cuint, params::Ptr{ucp_params_t}, config::Ptr{ucp_config_t}, context_p::Ptr{ucp_context_h})::ucs_status_t
 end
 
 function ucp_init(params, config, context_p)
-    ccall((:ucp_init, libucp), ucs_status_t, (Ptr{ucp_params_t}, Ptr{ucp_config_t}, Ptr{ucp_context_h}), params, config, context_p)
+    @ccall libucp.ucp_init(params::Ptr{ucp_params_t}, config::Ptr{ucp_config_t}, context_p::Ptr{ucp_context_h})::ucs_status_t
 end
 
 function ucp_cleanup(context_p)
-    ccall((:ucp_cleanup, libucp), Cvoid, (ucp_context_h,), context_p)
+    @ccall libucp.ucp_cleanup(context_p::ucp_context_h)::Cvoid
 end
 
 function ucp_context_query(context_p, attr)
-    ccall((:ucp_context_query, libucp), ucs_status_t, (ucp_context_h, Ptr{ucp_context_attr_t}), context_p, attr)
+    @ccall libucp.ucp_context_query(context_p::ucp_context_h, attr::Ptr{ucp_context_attr_t})::ucs_status_t
+end
+
+function ucp_rkey_compare(worker, rkey1, rkey2, params, result)
+    @ccall libucp.ucp_rkey_compare(worker::ucp_worker_h, rkey1::ucp_rkey_h, rkey2::ucp_rkey_h, params::Ptr{ucp_rkey_compare_params_t}, result::Ptr{Cint})::ucs_status_t
 end
 
 function ucp_context_print_info(context, stream)
-    ccall((:ucp_context_print_info, libucp), Cvoid, (ucp_context_h, Ptr{FILE}), context, stream)
+    @ccall libucp.ucp_context_print_info(context::ucp_context_h, stream::Ptr{FILE})::Cvoid
 end
 
 function ucp_worker_create(context, params, worker_p)
-    ccall((:ucp_worker_create, libucp), ucs_status_t, (ucp_context_h, Ptr{ucp_worker_params_t}, Ptr{ucp_worker_h}), context, params, worker_p)
+    @ccall libucp.ucp_worker_create(context::ucp_context_h, params::Ptr{ucp_worker_params_t}, worker_p::Ptr{ucp_worker_h})::ucs_status_t
 end
 
 function ucp_worker_destroy(worker)
-    ccall((:ucp_worker_destroy, libucp), Cvoid, (ucp_worker_h,), worker)
+    @ccall libucp.ucp_worker_destroy(worker::ucp_worker_h)::Cvoid
 end
 
 function ucp_worker_query(worker, attr)
-    ccall((:ucp_worker_query, libucp), ucs_status_t, (ucp_worker_h, Ptr{ucp_worker_attr_t}), worker, attr)
+    @ccall libucp.ucp_worker_query(worker::ucp_worker_h, attr::Ptr{ucp_worker_attr_t})::ucs_status_t
 end
 
 function ucp_worker_print_info(worker, stream)
-    ccall((:ucp_worker_print_info, libucp), Cvoid, (ucp_worker_h, Ptr{FILE}), worker, stream)
-end
-
-function ucp_worker_get_address(worker, address_p, address_length_p)
-    ccall((:ucp_worker_get_address, libucp), ucs_status_t, (ucp_worker_h, Ptr{Ptr{ucp_address_t}}, Ptr{Csize_t}), worker, address_p, address_length_p)
+    @ccall libucp.ucp_worker_print_info(worker::ucp_worker_h, stream::Ptr{FILE})::Cvoid
 end
 
 function ucp_worker_release_address(worker, address)
-    ccall((:ucp_worker_release_address, libucp), Cvoid, (ucp_worker_h, Ptr{ucp_address_t}), worker, address)
+    @ccall libucp.ucp_worker_release_address(worker::ucp_worker_h, address::Ptr{ucp_address_t})::Cvoid
+end
+
+function ucp_worker_address_query(address, attr)
+    @ccall libucp.ucp_worker_address_query(address::Ptr{ucp_address_t}, attr::Ptr{ucp_worker_address_attr_t})::ucs_status_t
 end
 
 function ucp_worker_progress(worker)
-    ccall((:ucp_worker_progress, libucp), Cuint, (ucp_worker_h,), worker)
+    @ccall libucp.ucp_worker_progress(worker::ucp_worker_h)::Cuint
 end
 
 function ucp_stream_worker_poll(worker, poll_eps, max_eps, flags)
-    ccall((:ucp_stream_worker_poll, libucp), Cssize_t, (ucp_worker_h, Ptr{ucp_stream_poll_ep_t}, Csize_t, Cuint), worker, poll_eps, max_eps, flags)
+    @ccall libucp.ucp_stream_worker_poll(worker::ucp_worker_h, poll_eps::Ptr{ucp_stream_poll_ep_t}, max_eps::Csize_t, flags::Cuint)::Cssize_t
 end
 
 function ucp_worker_get_efd(worker, fd)
-    ccall((:ucp_worker_get_efd, libucp), ucs_status_t, (ucp_worker_h, Ptr{Cint}), worker, fd)
+    @ccall libucp.ucp_worker_get_efd(worker::ucp_worker_h, fd::Ptr{Cint})::ucs_status_t
 end
 
 function ucp_worker_wait(worker)
-    ccall((:ucp_worker_wait, libucp), ucs_status_t, (ucp_worker_h,), worker)
+    @ccall libucp.ucp_worker_wait(worker::ucp_worker_h)::ucs_status_t
 end
 
 function ucp_worker_wait_mem(worker, address)
-    ccall((:ucp_worker_wait_mem, libucp), Cvoid, (ucp_worker_h, Ptr{Cvoid}), worker, address)
+    @ccall libucp.ucp_worker_wait_mem(worker::ucp_worker_h, address::Ptr{Cvoid})::Cvoid
 end
 
 function ucp_worker_arm(worker)
-    ccall((:ucp_worker_arm, libucp), ucs_status_t, (ucp_worker_h,), worker)
+    @ccall libucp.ucp_worker_arm(worker::ucp_worker_h)::ucs_status_t
 end
 
 function ucp_worker_signal(worker)
-    ccall((:ucp_worker_signal, libucp), ucs_status_t, (ucp_worker_h,), worker)
+    @ccall libucp.ucp_worker_signal(worker::ucp_worker_h)::ucs_status_t
 end
 
 function ucp_listener_create(worker, params, listener_p)
-    ccall((:ucp_listener_create, libucp), ucs_status_t, (ucp_worker_h, Ptr{ucp_listener_params_t}, Ptr{ucp_listener_h}), worker, params, listener_p)
+    @ccall libucp.ucp_listener_create(worker::ucp_worker_h, params::Ptr{ucp_listener_params_t}, listener_p::Ptr{ucp_listener_h})::ucs_status_t
 end
 
 function ucp_listener_destroy(listener)
-    ccall((:ucp_listener_destroy, libucp), Cvoid, (ucp_listener_h,), listener)
+    @ccall libucp.ucp_listener_destroy(listener::ucp_listener_h)::Cvoid
 end
 
 function ucp_listener_query(listener, attr)
-    ccall((:ucp_listener_query, libucp), ucs_status_t, (ucp_listener_h, Ptr{ucp_listener_attr_t}), listener, attr)
+    @ccall libucp.ucp_listener_query(listener::ucp_listener_h, attr::Ptr{ucp_listener_attr_t})::ucs_status_t
 end
 
 function ucp_conn_request_query(conn_request, attr)
-    ccall((:ucp_conn_request_query, libucp), ucs_status_t, (ucp_conn_request_h, Ptr{ucp_conn_request_attr_t}), conn_request, attr)
+    @ccall libucp.ucp_conn_request_query(conn_request::ucp_conn_request_h, attr::Ptr{ucp_conn_request_attr_t})::ucs_status_t
 end
 
 function ucp_request_query(request, attr)
-    ccall((:ucp_request_query, libucp), ucs_status_t, (Ptr{Cvoid}, Ptr{ucp_request_attr_t}), request, attr)
+    @ccall libucp.ucp_request_query(request::Ptr{Cvoid}, attr::Ptr{ucp_request_attr_t})::ucs_status_t
 end
 
 function ucp_ep_create(worker, params, ep_p)
-    ccall((:ucp_ep_create, libucp), ucs_status_t, (ucp_worker_h, Ptr{ucp_ep_params_t}, Ptr{ucp_ep_h}), worker, params, ep_p)
-end
-
-function ucp_ep_close_nb(ep, mode)
-    ccall((:ucp_ep_close_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Cuint), ep, mode)
+    @ccall libucp.ucp_ep_create(worker::ucp_worker_h, params::Ptr{ucp_ep_params_t}, ep_p::Ptr{ucp_ep_h})::ucs_status_t
 end
 
 function ucp_ep_close_nbx(ep, param)
-    ccall((:ucp_ep_close_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{ucp_request_param_t}), ep, param)
+    @ccall libucp.ucp_ep_close_nbx(ep::ucp_ep_h, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_listener_reject(listener, conn_request)
-    ccall((:ucp_listener_reject, libucp), ucs_status_t, (ucp_listener_h, ucp_conn_request_h), listener, conn_request)
+    @ccall libucp.ucp_listener_reject(listener::ucp_listener_h, conn_request::ucp_conn_request_h)::ucs_status_t
 end
 
 function ucp_ep_print_info(ep, stream)
-    ccall((:ucp_ep_print_info, libucp), Cvoid, (ucp_ep_h, Ptr{FILE}), ep, stream)
-end
-
-function ucp_ep_flush_nb(ep, flags, cb)
-    ccall((:ucp_ep_flush_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Cuint, ucp_send_callback_t), ep, flags, cb)
+    @ccall libucp.ucp_ep_print_info(ep::ucp_ep_h, stream::Ptr{FILE})::Cvoid
 end
 
 function ucp_ep_flush_nbx(ep, param)
-    ccall((:ucp_ep_flush_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{ucp_request_param_t}), ep, param)
+    @ccall libucp.ucp_ep_flush_nbx(ep::ucp_ep_h, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_ep_evaluate_perf(ep, param, attr)
-    ccall((:ucp_ep_evaluate_perf, libucp), ucs_status_t, (ucp_ep_h, Ptr{ucp_ep_evaluate_perf_param_t}, Ptr{ucp_ep_evaluate_perf_attr_t}), ep, param, attr)
+    @ccall libucp.ucp_ep_evaluate_perf(ep::ucp_ep_h, param::Ptr{ucp_ep_evaluate_perf_param_t}, attr::Ptr{ucp_ep_evaluate_perf_attr_t})::ucs_status_t
 end
 
 function ucp_mem_map(context, params, memh_p)
-    ccall((:ucp_mem_map, libucp), ucs_status_t, (ucp_context_h, Ptr{ucp_mem_map_params_t}, Ptr{ucp_mem_h}), context, params, memh_p)
+    @ccall libucp.ucp_mem_map(context::ucp_context_h, params::Ptr{ucp_mem_map_params_t}, memh_p::Ptr{ucp_mem_h})::ucs_status_t
 end
 
 function ucp_mem_unmap(context, memh)
-    ccall((:ucp_mem_unmap, libucp), ucs_status_t, (ucp_context_h, ucp_mem_h), context, memh)
+    @ccall libucp.ucp_mem_unmap(context::ucp_context_h, memh::ucp_mem_h)::ucs_status_t
 end
 
 function ucp_mem_query(memh, attr)
-    ccall((:ucp_mem_query, libucp), ucs_status_t, (ucp_mem_h, Ptr{ucp_mem_attr_t}), memh, attr)
+    @ccall libucp.ucp_mem_query(memh::ucp_mem_h, attr::Ptr{ucp_mem_attr_t})::ucs_status_t
 end
 
-function ucp_mem_print_info(mem_size, context, stream)
-    ccall((:ucp_mem_print_info, libucp), Cvoid, (Ptr{Cchar}, ucp_context_h, Ptr{FILE}), mem_size, context, stream)
+function ucp_mem_print_info(mem_spec, context, stream)
+    @ccall libucp.ucp_mem_print_info(mem_spec::Ptr{Cchar}, context::ucp_context_h, stream::Ptr{FILE})::Cvoid
 end
 
 @cenum ucp_mem_advice::UInt32 begin
@@ -1050,221 +1260,180 @@ end
 const ucp_mem_advise_params_t = ucp_mem_advise_params
 
 function ucp_mem_advise(context, memh, params)
-    ccall((:ucp_mem_advise, libucp), ucs_status_t, (ucp_context_h, ucp_mem_h, Ptr{ucp_mem_advise_params_t}), context, memh, params)
+    @ccall libucp.ucp_mem_advise(context::ucp_context_h, memh::ucp_mem_h, params::Ptr{ucp_mem_advise_params_t})::ucs_status_t
 end
 
-function ucp_rkey_pack(context, memh, rkey_buffer_p, size_p)
-    ccall((:ucp_rkey_pack, libucp), ucs_status_t, (ucp_context_h, ucp_mem_h, Ptr{Ptr{Cvoid}}, Ptr{Csize_t}), context, memh, rkey_buffer_p, size_p)
+@cenum ucp_memh_pack_params_field::UInt32 begin
+    UCP_MEMH_PACK_PARAM_FIELD_FLAGS = 1
 end
 
-function ucp_rkey_buffer_release(rkey_buffer)
-    ccall((:ucp_rkey_buffer_release, libucp), Cvoid, (Ptr{Cvoid},), rkey_buffer)
+@cenum ucp_memh_pack_flags::UInt32 begin
+    UCP_MEMH_PACK_FLAG_EXPORT = 1
+end
+
+struct ucp_memh_pack_params
+    field_mask::UInt64
+    flags::UInt64
+end
+
+const ucp_memh_pack_params_t = ucp_memh_pack_params
+
+function ucp_memh_pack(memh, params, buffer_p, buffer_size_p)
+    @ccall libucp.ucp_memh_pack(memh::ucp_mem_h, params::Ptr{ucp_memh_pack_params_t}, buffer_p::Ptr{Ptr{Cvoid}}, buffer_size_p::Ptr{Csize_t})::ucs_status_t
+end
+
+struct ucp_memh_buffer_release_params
+    field_mask::UInt64
+end
+
+const ucp_memh_buffer_release_params_t = ucp_memh_buffer_release_params
+
+function ucp_memh_buffer_release(buffer, params)
+    @ccall libucp.ucp_memh_buffer_release(buffer::Ptr{Cvoid}, params::Ptr{ucp_memh_buffer_release_params_t})::Cvoid
 end
 
 function ucp_ep_rkey_unpack(ep, rkey_buffer, rkey_p)
-    ccall((:ucp_ep_rkey_unpack, libucp), ucs_status_t, (ucp_ep_h, Ptr{Cvoid}, Ptr{ucp_rkey_h}), ep, rkey_buffer, rkey_p)
+    @ccall libucp.ucp_ep_rkey_unpack(ep::ucp_ep_h, rkey_buffer::Ptr{Cvoid}, rkey_p::Ptr{ucp_rkey_h})::ucs_status_t
 end
 
 function ucp_rkey_ptr(rkey, raddr, addr_p)
-    ccall((:ucp_rkey_ptr, libucp), ucs_status_t, (ucp_rkey_h, UInt64, Ptr{Ptr{Cvoid}}), rkey, raddr, addr_p)
+    @ccall libucp.ucp_rkey_ptr(rkey::ucp_rkey_h, raddr::UInt64, addr_p::Ptr{Ptr{Cvoid}})::ucs_status_t
 end
 
 function ucp_rkey_destroy(rkey)
-    ccall((:ucp_rkey_destroy, libucp), Cvoid, (ucp_rkey_h,), rkey)
-end
-
-function ucp_worker_set_am_handler(worker, id, cb, arg, flags)
-    ccall((:ucp_worker_set_am_handler, libucp), ucs_status_t, (ucp_worker_h, UInt16, ucp_am_callback_t, Ptr{Cvoid}, UInt32), worker, id, cb, arg, flags)
+    @ccall libucp.ucp_rkey_destroy(rkey::ucp_rkey_h)::Cvoid
 end
 
 function ucp_worker_set_am_recv_handler(worker, param)
-    ccall((:ucp_worker_set_am_recv_handler, libucp), ucs_status_t, (ucp_worker_h, Ptr{ucp_am_handler_param_t}), worker, param)
-end
-
-function ucp_am_send_nb(ep, id, buffer, count, datatype, cb, flags)
-    ccall((:ucp_am_send_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, UInt16, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_send_callback_t, Cuint), ep, id, buffer, count, datatype, cb, flags)
+    @ccall libucp.ucp_worker_set_am_recv_handler(worker::ucp_worker_h, param::Ptr{ucp_am_handler_param_t})::ucs_status_t
 end
 
 function ucp_am_send_nbx(ep, id, header, header_length, buffer, count, param)
-    ccall((:ucp_am_send_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Cuint, Ptr{Cvoid}, Csize_t, Ptr{Cvoid}, Csize_t, Ptr{ucp_request_param_t}), ep, id, header, header_length, buffer, count, param)
+    @ccall libucp.ucp_am_send_nbx(ep::ucp_ep_h, id::Cuint, header::Ptr{Cvoid}, header_length::Csize_t, buffer::Ptr{Cvoid}, count::Csize_t, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_am_recv_data_nbx(worker, data_desc, buffer, count, param)
-    ccall((:ucp_am_recv_data_nbx, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Ptr{Cvoid}, Csize_t, Ptr{ucp_request_param_t}), worker, data_desc, buffer, count, param)
+    @ccall libucp.ucp_am_recv_data_nbx(worker::ucp_worker_h, data_desc::Ptr{Cvoid}, buffer::Ptr{Cvoid}, count::Csize_t, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_am_data_release(worker, data)
-    ccall((:ucp_am_data_release, libucp), Cvoid, (ucp_worker_h, Ptr{Cvoid}), worker, data)
-end
-
-function ucp_stream_send_nb(ep, buffer, count, datatype, cb, flags)
-    ccall((:ucp_stream_send_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_send_callback_t, Cuint), ep, buffer, count, datatype, cb, flags)
+    @ccall libucp.ucp_am_data_release(worker::ucp_worker_h, data::Ptr{Cvoid})::Cvoid
 end
 
 function ucp_stream_send_nbx(ep, buffer, count, param)
-    ccall((:ucp_stream_send_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, Ptr{ucp_request_param_t}), ep, buffer, count, param)
-end
-
-function ucp_tag_send_nb(ep, buffer, count, datatype, tag, cb)
-    ccall((:ucp_tag_send_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_tag_t, ucp_send_callback_t), ep, buffer, count, datatype, tag, cb)
-end
-
-function ucp_tag_send_nbr(ep, buffer, count, datatype, tag, req)
-    ccall((:ucp_tag_send_nbr, libucp), ucs_status_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_tag_t, Ptr{Cvoid}), ep, buffer, count, datatype, tag, req)
-end
-
-function ucp_tag_send_sync_nb(ep, buffer, count, datatype, tag, cb)
-    ccall((:ucp_tag_send_sync_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_tag_t, ucp_send_callback_t), ep, buffer, count, datatype, tag, cb)
+    @ccall libucp.ucp_stream_send_nbx(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_tag_send_nbx(ep, buffer, count, tag, param)
-    ccall((:ucp_tag_send_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, ucp_tag_t, Ptr{ucp_request_param_t}), ep, buffer, count, tag, param)
+    @ccall libucp.ucp_tag_send_nbx(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, tag::ucp_tag_t, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_tag_send_sync_nbx(ep, buffer, count, tag, param)
-    ccall((:ucp_tag_send_sync_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, ucp_tag_t, Ptr{ucp_request_param_t}), ep, buffer, count, tag, param)
-end
-
-function ucp_stream_recv_nb(ep, buffer, count, datatype, cb, length, flags)
-    ccall((:ucp_stream_recv_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_stream_recv_callback_t, Ptr{Csize_t}, Cuint), ep, buffer, count, datatype, cb, length, flags)
+    @ccall libucp.ucp_tag_send_sync_nbx(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, tag::ucp_tag_t, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_stream_recv_nbx(ep, buffer, count, length, param)
-    ccall((:ucp_stream_recv_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, Ptr{Csize_t}, Ptr{ucp_request_param_t}), ep, buffer, count, length, param)
+    @ccall libucp.ucp_stream_recv_nbx(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, length::Ptr{Csize_t}, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_stream_recv_data_nb(ep, length)
-    ccall((:ucp_stream_recv_data_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Csize_t}), ep, length)
-end
-
-function ucp_tag_recv_nb(worker, buffer, count, datatype, tag, tag_mask, cb)
-    ccall((:ucp_tag_recv_nb, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_tag_t, ucp_tag_t, ucp_tag_recv_callback_t), worker, buffer, count, datatype, tag, tag_mask, cb)
-end
-
-function ucp_tag_recv_nbr(worker, buffer, count, datatype, tag, tag_mask, req)
-    ccall((:ucp_tag_recv_nbr, libucp), ucs_status_t, (ucp_worker_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_tag_t, ucp_tag_t, Ptr{Cvoid}), worker, buffer, count, datatype, tag, tag_mask, req)
+    @ccall libucp.ucp_stream_recv_data_nb(ep::ucp_ep_h, length::Ptr{Csize_t})::ucs_status_ptr_t
 end
 
 function ucp_tag_recv_nbx(worker, buffer, count, tag, tag_mask, param)
-    ccall((:ucp_tag_recv_nbx, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Csize_t, ucp_tag_t, ucp_tag_t, Ptr{ucp_request_param_t}), worker, buffer, count, tag, tag_mask, param)
+    @ccall libucp.ucp_tag_recv_nbx(worker::ucp_worker_h, buffer::Ptr{Cvoid}, count::Csize_t, tag::ucp_tag_t, tag_mask::ucp_tag_t, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_tag_probe_nb(worker, tag, tag_mask, remove, info)
-    ccall((:ucp_tag_probe_nb, libucp), ucp_tag_message_h, (ucp_worker_h, ucp_tag_t, ucp_tag_t, Cint, Ptr{ucp_tag_recv_info_t}), worker, tag, tag_mask, remove, info)
-end
-
-function ucp_tag_msg_recv_nb(worker, buffer, count, datatype, message, cb)
-    ccall((:ucp_tag_msg_recv_nb, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Csize_t, ucp_datatype_t, ucp_tag_message_h, ucp_tag_recv_callback_t), worker, buffer, count, datatype, message, cb)
+    @ccall libucp.ucp_tag_probe_nb(worker::ucp_worker_h, tag::ucp_tag_t, tag_mask::ucp_tag_t, remove::Cint, info::Ptr{ucp_tag_recv_info_t})::ucp_tag_message_h
 end
 
 function ucp_tag_msg_recv_nbx(worker, buffer, count, message, param)
-    ccall((:ucp_tag_msg_recv_nbx, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{Cvoid}, Csize_t, ucp_tag_message_h, Ptr{ucp_request_param_t}), worker, buffer, count, message, param)
-end
-
-function ucp_put_nbi(ep, buffer, length, remote_addr, rkey)
-    ccall((:ucp_put_nbi, libucp), ucs_status_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h), ep, buffer, length, remote_addr, rkey)
-end
-
-function ucp_put_nb(ep, buffer, length, remote_addr, rkey, cb)
-    ccall((:ucp_put_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h, ucp_send_callback_t), ep, buffer, length, remote_addr, rkey, cb)
+    @ccall libucp.ucp_tag_msg_recv_nbx(worker::ucp_worker_h, buffer::Ptr{Cvoid}, count::Csize_t, message::ucp_tag_message_h, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_put_nbx(ep, buffer, count, remote_addr, rkey, param)
-    ccall((:ucp_put_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h, Ptr{ucp_request_param_t}), ep, buffer, count, remote_addr, rkey, param)
-end
-
-function ucp_get_nbi(ep, buffer, length, remote_addr, rkey)
-    ccall((:ucp_get_nbi, libucp), ucs_status_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h), ep, buffer, length, remote_addr, rkey)
-end
-
-function ucp_get_nb(ep, buffer, length, remote_addr, rkey, cb)
-    ccall((:ucp_get_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h, ucp_send_callback_t), ep, buffer, length, remote_addr, rkey, cb)
+    @ccall libucp.ucp_put_nbx(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_get_nbx(ep, buffer, count, remote_addr, rkey, param)
-    ccall((:ucp_get_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h, Ptr{ucp_request_param_t}), ep, buffer, count, remote_addr, rkey, param)
-end
-
-function ucp_atomic_post(ep, opcode, value, op_size, remote_addr, rkey)
-    ccall((:ucp_atomic_post, libucp), ucs_status_t, (ucp_ep_h, ucp_atomic_post_op_t, UInt64, Csize_t, UInt64, ucp_rkey_h), ep, opcode, value, op_size, remote_addr, rkey)
-end
-
-function ucp_atomic_fetch_nb(ep, opcode, value, result, op_size, remote_addr, rkey, cb)
-    ccall((:ucp_atomic_fetch_nb, libucp), ucs_status_ptr_t, (ucp_ep_h, ucp_atomic_fetch_op_t, UInt64, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h, ucp_send_callback_t), ep, opcode, value, result, op_size, remote_addr, rkey, cb)
+    @ccall libucp.ucp_get_nbx(ep::ucp_ep_h, buffer::Ptr{Cvoid}, count::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_atomic_op_nbx(ep, opcode, buffer, count, remote_addr, rkey, param)
-    ccall((:ucp_atomic_op_nbx, libucp), ucs_status_ptr_t, (ucp_ep_h, ucp_atomic_op_t, Ptr{Cvoid}, Csize_t, UInt64, ucp_rkey_h, Ptr{ucp_request_param_t}), ep, opcode, buffer, count, remote_addr, rkey, param)
+    @ccall libucp.ucp_atomic_op_nbx(ep::ucp_ep_h, opcode::ucp_atomic_op_t, buffer::Ptr{Cvoid}, count::Csize_t, remote_addr::UInt64, rkey::ucp_rkey_h, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 function ucp_request_check_status(request)
-    ccall((:ucp_request_check_status, libucp), ucs_status_t, (Ptr{Cvoid},), request)
+    @ccall libucp.ucp_request_check_status(request::Ptr{Cvoid})::ucs_status_t
 end
 
 function ucp_tag_recv_request_test(request, info)
-    ccall((:ucp_tag_recv_request_test, libucp), ucs_status_t, (Ptr{Cvoid}, Ptr{ucp_tag_recv_info_t}), request, info)
+    @ccall libucp.ucp_tag_recv_request_test(request::Ptr{Cvoid}, info::Ptr{ucp_tag_recv_info_t})::ucs_status_t
 end
 
 function ucp_stream_recv_request_test(request, length_p)
-    ccall((:ucp_stream_recv_request_test, libucp), ucs_status_t, (Ptr{Cvoid}, Ptr{Csize_t}), request, length_p)
+    @ccall libucp.ucp_stream_recv_request_test(request::Ptr{Cvoid}, length_p::Ptr{Csize_t})::ucs_status_t
 end
 
 function ucp_request_cancel(worker, request)
-    ccall((:ucp_request_cancel, libucp), Cvoid, (ucp_worker_h, Ptr{Cvoid}), worker, request)
+    @ccall libucp.ucp_request_cancel(worker::ucp_worker_h, request::Ptr{Cvoid})::Cvoid
 end
 
 function ucp_stream_data_release(ep, data)
-    ccall((:ucp_stream_data_release, libucp), Cvoid, (ucp_ep_h, Ptr{Cvoid}), ep, data)
+    @ccall libucp.ucp_stream_data_release(ep::ucp_ep_h, data::Ptr{Cvoid})::Cvoid
 end
 
 function ucp_request_free(request)
-    ccall((:ucp_request_free, libucp), Cvoid, (Ptr{Cvoid},), request)
-end
-
-function ucp_request_alloc(worker)
-    ccall((:ucp_request_alloc, libucp), Ptr{Cvoid}, (ucp_worker_h,), worker)
+    @ccall libucp.ucp_request_free(request::Ptr{Cvoid})::Cvoid
 end
 
 function ucp_dt_create_generic(ops, context, datatype_p)
-    ccall((:ucp_dt_create_generic, libucp), ucs_status_t, (Ptr{ucp_generic_dt_ops_t}, Ptr{Cvoid}, Ptr{ucp_datatype_t}), ops, context, datatype_p)
+    @ccall libucp.ucp_dt_create_generic(ops::Ptr{ucp_generic_dt_ops_t}, context::Ptr{Cvoid}, datatype_p::Ptr{ucp_datatype_t})::ucs_status_t
 end
 
 function ucp_dt_destroy(datatype)
-    ccall((:ucp_dt_destroy, libucp), Cvoid, (ucp_datatype_t,), datatype)
+    @ccall libucp.ucp_dt_destroy(datatype::ucp_datatype_t)::Cvoid
+end
+
+function ucp_dt_query(datatype, attr)
+    @ccall libucp.ucp_dt_query(datatype::ucp_datatype_t, attr::Ptr{ucp_datatype_attr_t})::ucs_status_t
 end
 
 function ucp_worker_fence(worker)
-    ccall((:ucp_worker_fence, libucp), ucs_status_t, (ucp_worker_h,), worker)
-end
-
-function ucp_worker_flush_nb(worker, flags, cb)
-    ccall((:ucp_worker_flush_nb, libucp), ucs_status_ptr_t, (ucp_worker_h, Cuint, ucp_send_callback_t), worker, flags, cb)
+    @ccall libucp.ucp_worker_fence(worker::ucp_worker_h)::ucs_status_t
 end
 
 function ucp_worker_flush_nbx(worker, param)
-    ccall((:ucp_worker_flush_nbx, libucp), ucs_status_ptr_t, (ucp_worker_h, Ptr{ucp_request_param_t}), worker, param)
+    @ccall libucp.ucp_worker_flush_nbx(worker::ucp_worker_h, param::Ptr{ucp_request_param_t})::ucs_status_ptr_t
 end
 
 @cenum ucp_ep_attr_field::UInt32 begin
     UCP_EP_ATTR_FIELD_NAME = 1
+    UCP_EP_ATTR_FIELD_LOCAL_SOCKADDR = 2
+    UCP_EP_ATTR_FIELD_REMOTE_SOCKADDR = 4
+    UCP_EP_ATTR_FIELD_TRANSPORTS = 8
+    UCP_EP_ATTR_FIELD_USER_DATA = 16
 end
 
 struct ucp_ep_attr
     field_mask::UInt64
     name::NTuple{32, Cchar}
+    local_sockaddr::sockaddr_storage
+    remote_sockaddr::sockaddr_storage
+    transports::ucp_transports_t
+    user_data::Ptr{Cvoid}
 end
 
 const ucp_ep_attr_t = ucp_ep_attr
 
 function ucp_ep_query(ep, attr)
-    ccall((:ucp_ep_query, libucp), ucs_status_t, (ucp_ep_h, Ptr{ucp_ep_attr_t}), ep, attr)
+    @ccall libucp.ucp_ep_query(ep::ucp_ep_h, attr::Ptr{ucp_ep_attr_t})::ucs_status_t
 end
 
 const UCS_ALLOCA_MAX_SIZE = 1200
 
-# const UCS_EMPTY_STATEMENT = {}
-
-const UCS_MEMORY_TYPES_CPU_ACCESSIBLE = (UCS_BIT(UCS_MEMORY_TYPE_HOST) | UCS_BIT(UCS_MEMORY_TYPE_CUDA_MANAGED)) | UCS_BIT(UCS_MEMORY_TYPE_ROCM_MANAGED)
+const UCS_MEMORY_TYPES_CPU_ACCESSIBLE = ((UCS_BIT(UCS_MEMORY_TYPE_HOST) | UCS_BIT(UCS_MEMORY_TYPE_ROCM_MANAGED)) | UCS_BIT(UCS_MEMORY_TYPE_ZE_HOST)) | UCS_BIT(UCS_MEMORY_TYPE_ZE_MANAGED)
 
 const UCP_ENTITY_NAME_MAX = 32
 
@@ -1274,9 +1443,9 @@ const UCP_VERSION_MINOR_SHIFT = 16
 
 const UCP_API_MAJOR = 1
 
-const UCP_API_MINOR = 11
+const UCP_API_MINOR = 20
 
-const UCP_API_VERSION = UCP_VERSION(1, 11)
+const UCP_API_VERSION = UCP_VERSION(1, 20)
 
 const UCS_CPU_SETSIZE = 1024
 

@@ -1,5 +1,5 @@
 
-include(joinpath(@__DIR__, "..", "deps", "deps.jl"))
+using ..UCX: libucp
 
 const FILE = Base.Libc.FILE
 const __socklen_t = Cuint
