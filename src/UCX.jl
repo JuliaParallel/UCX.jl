@@ -1,9 +1,8 @@
 module UCX
 
 using Sockets: InetAddr, IPv4, listenany
-using Random
-import FunctionWrappers: FunctionWrapper
-import CEnum
+using FunctionWrappers: FunctionWrapper
+using CEnum: CEnum
 using Preferences: set_preferences!, delete_preferences!, @load_preference, @has_preference
 
 const PROGRESS_MODE = Ref(:idling)
@@ -420,7 +419,7 @@ end
 
 include("idle.jl")
 
-import FileWatching: poll_fd
+using FileWatching: poll_fd
 function Base.wait(worker::UCXWorker)
     if ispolling(worker)
         @assert progress_mode(worker) === :polling
@@ -1078,8 +1077,7 @@ end
 ## RMA
 
 
-import Base.get!
-function get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+function Base.get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
     param = request_param(dt, request, (cb, :send))
@@ -1088,7 +1086,7 @@ function get!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     return handle_request(request, ptr)
 end
 
-function get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+function Base.get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     request = UCXRequest(ep, buffer) # rooted through ep.worker
     GC.@preserve buffer begin
         data = pointer(buffer)
@@ -1096,7 +1094,7 @@ function get!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     end
 end
 
-function get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+function Base.get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
     request = UCXRequest(ep, ref) # rooted through ep.worker
     GC.@preserve ref begin
         data = Base.unsafe_convert(Ptr{Cvoid}, ref)
@@ -1105,8 +1103,7 @@ function get!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
 end
 
 
-import Base.put!
-function put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
+function Base.put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     dt = ucp_dt_make_contig(1) # since we are sending nbytes
     cb = @cfunction(send_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{Cvoid}))
     param = request_param(dt, request, (cb, :send))
@@ -1115,7 +1112,7 @@ function put!(ep::UCXEndpoint, request, data::Ptr, nbytes, remote_addr, rkey)
     return handle_request(request, ptr)
 end
 
-function put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
+function Base.put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     request = UCXRequest(ep, buffer) # rooted through ep.worker
     GC.@preserve buffer begin
         data = pointer(buffer)
@@ -1123,7 +1120,7 @@ function put!(ep::UCXEndpoint, buffer, nbytes, remote_addr, rkey)
     end
 end
 
-function put!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
+function Base.put!(ep::UCXEndpoint, ref::Ref{T}, remote_addr, rkey) where T
     request = UCXRequest(ep, ref) # rooted through ep.worker
     GC.@preserve ref begin
         data = Base.unsafe_convert(Ptr{Cvoid}, ref)
