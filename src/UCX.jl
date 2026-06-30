@@ -223,7 +223,7 @@ mutable struct UCXContext
             field_mask |= API.UCP_PARAM_FIELD_MT_WORKERS_SHARED
         end
 
-        features = zero(CEnum.basetype(UCX.API.ucp_feature))
+        features = zero(CEnum.basetype(API.ucp_feature))
         if wakeup
             features |= API.UCP_FEATURE_WAKEUP
         end
@@ -332,7 +332,7 @@ mutable struct UCXWorker
 
         # TODO: Verify that UCXContext has been created with WAKEUP
         if progress_mode === :polling
-            r_fd = Ref{API.Cint}()
+            r_fd = Ref{Cint}()
             @check API.ucp_worker_get_efd(handle, r_fd)
             fd = Libc.RawFD(r_fd[])
         else
@@ -695,7 +695,7 @@ function _UCXEndpoint(worker::UCXWorker, addr::Ptr{API.ucp_address_t})
 end
 
 function listener_callback(conn_request_h::API.ucp_conn_request_h, args::Ptr{Cvoid})
-    conn_request = UCX.UCXConnectionRequest(conn_request_h)
+    conn_request = UCXConnectionRequest(conn_request_h)
     listener = Base.unsafe_pointer_to_objref(args)::UCXListener
     Base.invokelatest(listener.callback, listener, conn_request)
     nothing
@@ -806,7 +806,7 @@ end
 
 ##
 # RemoteKey
-## 
+##
 
 mutable struct RemoteKey
     handle::API.ucp_rkey_h
@@ -968,7 +968,7 @@ function send(ep::UCXEndpoint, buffer, nbytes, tag)
     end
 end
 
-function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp_tag_t))
+function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(API.ucp_tag_t))
     dt = ucp_dt_make_contig(1) # since we are receiving nbytes
     request = UCXRequest(worker, buffer) # rooted through worker
     cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}, Ptr{Cvoid}))
@@ -1204,17 +1204,17 @@ end
 tag(kind, seed, port) = hash(kind, hash(seed, hash(port)))
 
 function Endpoint(worker::Worker, addr, port)
-    ep = UCX.UCXEndpoint(worker.worker, addr, port)
+    ep = UCXEndpoint(worker.worker, addr, port)
     Endpoint(worker, ep, false)
 end
 
 function Endpoint(worker::Worker, connection::UCXConnectionRequest)
-    ep = UCX.UCXEndpoint(worker.worker, connection)
+    ep = UCXEndpoint(worker.worker, connection)
     Endpoint(worker, ep, true)
 end
 
 function Endpoint(worker::Worker, ep::UCXEndpoint, listener)
-    seed = rand(UInt128) 
+    seed = rand(UInt128)
     pid = getpid()
     msg_tag = tag(:ctrl, seed, pid)
 
