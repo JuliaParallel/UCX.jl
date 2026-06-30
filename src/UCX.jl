@@ -77,11 +77,16 @@ end
     return reinterpret(Ptr{fieldtype(T, field)}, ptr)
 end
 
-@inline function set!(ref::Ref{T}, fieldname, val) where T
-    GC.@preserve ref begin
+# Allocate a zeroed `Ref{T}` and set the given fields
+function zeroedref(::Type{T}; kwargs...) where T
+    ref = Ref{T}()
+    memzero!(ref)
+
+    for (fieldname, val) in kwargs
         Base.unsafe_store!(unsafe_fieldptr(ref, fieldname), val)
     end
-    val
+
+    return ref
 end
 
 # Exceptions/Status
@@ -89,7 +94,7 @@ end
 uintptr_t(ptr::Ptr) = reinterpret(UInt, ptr)
 uintptr_t(status::API.ucs_status_t) = reinterpret(UInt, convert(Int, status))
 
-UCS_PTR_STATUS(ptr::Ptr{Cvoid}) = API.ucs_status_t(reinterpret(UInt, ptr)) 
+UCS_PTR_STATUS(ptr::Ptr{Cvoid}) = API.ucs_status_t(reinterpret(UInt, ptr))
 UCS_PTR_IS_ERR(ptr::Ptr{Cvoid}) = uintptr_t(ptr) >= uintptr_t(API.UCS_ERR_LAST)
 UCS_PTR_IS_PTR(ptr::Ptr{Cvoid}) = (uintptr_t(ptr) - 1) < (uintptr_t(API.UCS_ERR_LAST) - 1)
 
@@ -144,10 +149,7 @@ end
 
 function query()
     field_mask = API.UCP_LIB_ATTR_FIELD_MAX_THREAD_LEVEL
-    r_attr = Ref{API.ucp_lib_attr_t}()
-
-    memzero!(r_attr)
-    set!(r_attr, :field_mask, field_mask)
+    r_attr = zeroedref(API.ucp_lib_attr_t; field_mask)
 
     @check API.ucp_lib_query(r_attr)
     r_attr[]
@@ -245,14 +247,7 @@ mutable struct UCXContext
                         API.UCP_FEATURE_RMA
         end
 
-        params = Ref{API.ucp_params}()
-        memzero!(params)
-        set!(params, :field_mask,      field_mask)
-        set!(params, :features,        features)
-
-        if shared
-            set!(params, :mt_workers_shared, true)
-        end
+        params = zeroedref(API.ucp_params; field_mask, features, mt_workers_shared=shared)
 
         config = UCXConfig(; kwargs...)
 
@@ -292,10 +287,7 @@ end
 
 function query(ctx::UCXContext)
     field_mask = API.UCP_ATTR_FIELD_THREAD_MODE
-    r_attr = Ref{API.ucp_context_attr_t}()
-
-    memzero!(r_attr)
-    set!(r_attr, :field_mask, field_mask)
+    r_attr = zeroedref(API.ucp_context_attr_t; field_mask)
 
     @check API.ucp_context_query(ctx, r_attr)
     r_attr[]
@@ -319,10 +311,7 @@ mutable struct UCXWorker
         field_mask  = API.UCP_WORKER_PARAM_FIELD_THREAD_MODE
         thread_mode = API.UCS_THREAD_MODE_MULTI
 
-        params = Ref{API.ucp_worker_params}()
-        memzero!(params)
-        set!(params, :field_mask,  field_mask)
-        set!(params, :thread_mode, thread_mode)
+        params = zeroedref(API.ucp_worker_params; field_mask, thread_mode)
 
         @debug "Creating UCXWorker" thread_mode progress_mode
 
@@ -353,10 +342,7 @@ Base.unsafe_convert(::Type{API.ucp_worker_h}, worker::UCXWorker) = worker.handle
 function query(worker::UCXWorker)
     field_mask = API.UCP_WORKER_ATTR_FIELD_THREAD_MODE |
                  API.UCP_WORKER_ATTR_FIELD_MAX_AM_HEADER
-    r_attr = Ref{API.ucp_worker_attr_t}()
-
-    memzero!(r_attr)
-    set!(r_attr, :field_mask, field_mask)
+    r_attr = zeroedref(API.ucp_worker_attr_t; field_mask)
     API.ucp_worker_query(worker, r_attr)
     r_attr[]
 end
@@ -534,12 +520,7 @@ function AMHandler(worker::UCXWorker, func, id)
                   API.UCP_AM_HANDLER_PARAM_FIELD_CB |
                   API.UCP_AM_HANDLER_PARAM_FIELD_ARG
 
-    params = Ref{API.ucp_am_handler_param_t}()
-    memzero!(params)
-    set!(params, :field_mask, field_mask)
-    set!(params, :id,         id)
-    set!(params, :cb,         cb)
-    set!(params, :arg,        arg)
+    params = zeroedref(API.ucp_am_handler_param_t; field_mask, id, cb, arg)
 
     @check API.ucp_worker_set_am_recv_handler(worker, params)
 end
@@ -551,12 +532,7 @@ function delete_am!(worker::UCXWorker, id)
                   API.UCP_AM_HANDLER_PARAM_FIELD_CB |
                   API.UCP_AM_HANDLER_PARAM_FIELD_ARG
 
-    params = Ref{API.ucp_am_handler_param_t}()
-    memzero!(params)
-    set!(params, :field_mask, field_mask)
-    set!(params, :id,         id)
-    set!(params, :cb,         C_NULL)
-    set!(params, :arg,        C_NULL)
+    params = zeroedref(API.ucp_am_handler_param_t; field_mask, id, cb=C_NULL, arg=C_NULL)
 
     @check API.ucp_worker_set_am_recv_handler(worker, params)
 end
@@ -632,14 +608,10 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
         addrlen = sizeof(IP.sockaddr_in)
         ucs_sockaddr = API.ucs_sock_addr(reinterpret(Ptr{API.sockaddr}, ptr), addrlen)
 
-        params = Ref{API.ucp_ep_params}()
-        memzero!(params)
-        set!(params, :field_mask,   field_mask)
-        set!(params, :sockaddr,     ucs_sockaddr)
-        set!(params, :flags,        flags)
+        params = zeroedref(API.ucp_ep_params; field_mask, sockaddr=ucs_sockaddr, flags)
 
         # TODO: Error callback
-    
+
         @check API.ucp_ep_create(worker, params, r_handle)
     end
 
@@ -651,11 +623,7 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
                  API.UCP_EP_PARAM_FIELD_CONN_REQUEST
     flags      = API.UCP_EP_PARAMS_FLAGS_NO_LOOPBACK
 
-    params = Ref{API.ucp_ep_params}()
-    memzero!(params)
-    set!(params, :field_mask,   field_mask)
-    set!(params, :conn_request, conn_request.handle)
-    set!(params, :flags,        flags)
+    params = zeroedref(API.ucp_ep_params; field_mask, conn_request=conn_request.handle, flags)
 
     # TODO: Error callback
 
@@ -682,10 +650,7 @@ function _UCXEndpoint(worker::UCXWorker, addr::Ptr{API.ucp_address_t})
     field_mask = API.UCP_EP_PARAM_FIELD_REMOTE_ADDRESS
 
     r_handle = Ref{API.ucp_ep_h}()
-    params = Ref{API.ucp_ep_params}()
-    memzero!(params)
-    set!(params, :field_mask,   field_mask)
-    set!(params, :address,      addr)
+    params = zeroedref(API.ucp_ep_params; field_mask, address=addr)
 
     # TODO: Error callback
 
@@ -730,11 +695,7 @@ mutable struct UCXListener
             addrlen = sizeof(IP.sockaddr_in)
             ucs_sockaddr = API.ucs_sock_addr(reinterpret(Ptr{API.sockaddr}, ptr), addrlen)
 
-            params = Ref{API.ucp_listener_params}()
-            memzero!(params)
-            set!(params, :field_mask, field_mask)
-            set!(params, :sockaddr, ucs_sockaddr)
-            set!(params, :conn_handler, conn_handler)
+            params = zeroedref(API.ucp_listener_params; field_mask, sockaddr=ucs_sockaddr, conn_handler)
 
             @check API.ucp_listener_create(worker, params, r_handle)
         end
@@ -772,20 +733,7 @@ mutable struct Memory
     function Memory(ctx::UCXContext, obj, addr::Ptr, length)
         field_mask = API.UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
                      API.UCP_MEM_MAP_PARAM_FIELD_LENGTH
-
-        # if data === nothing
-        #     @assert addr == C_NULL
-        #     field_mask |= API.UCP_MEM_MAP_PARAM_FIELD_FLAGS
-        # end
-        
-        params = Ref{API.ucp_mem_map_params}()
-        memzero!(params)
-        set!(params, :field_mask,   field_mask)
-        set!(params, :address,      addr)
-        set!(params, :length,       length)
-        # if data === nothing
-        #     set!(params, :flags, API.UCP_MEM_MAP_NONBLOCK | API.UCP_MEM_MAP_ALLOCATE)
-        # end
+        params = zeroedref(API.ucp_mem_map_params; field_mask, address=addr, length)
 
         r_handle = Ref{API.ucp_mem_h}()
         @check API.ucp_mem_map(ctx, params, r_handle)
