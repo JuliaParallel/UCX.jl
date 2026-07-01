@@ -553,19 +553,21 @@ end
 
 function am_recv_callback(arg::Ptr{Cvoid}, header::Ptr{Cvoid}, header_length::Csize_t, data::Ptr{Cvoid}, length::Csize_t, param::Ptr{API.ucp_am_recv_param_t})::API.ucs_status_t
     handler = Base.unsafe_pointer_to_objref(arg)::AMHandler
-    locked = false
 
     try
         lock_am(handler.worker)
-        locked = true
+    catch err
+        showerror(stderr, err, catch_backtrace())
+        return API.UCS_OK
+    end
+
+    try
         return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
     catch err
         showerror(stderr, err, catch_backtrace())
         return API.UCS_OK
     finally
-        if locked
-            unlock_am(handler.worker)
-        end
+        unlock_am(handler.worker)
     end
 end
 
