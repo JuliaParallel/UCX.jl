@@ -1,3 +1,5 @@
 [deps]
 Clang = "40e3b903-d033-50b4-a0cc-940c62c95e31"
+JuliaFormatter = "98e50ef6-434e-11e9-1051-2b60c6c9e899"
+MacroTools = "1914dd2f-81c6-5fcd-8719-6d5c9610ff09"
 UCX_jll = "16e4e860-d6b8-5056-a518-93e88b6392ae"
