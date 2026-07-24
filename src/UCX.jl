@@ -15,6 +15,9 @@ else
 end
 
 include("api.jl")
+
+using .API: UCXException
+
 include("ip.jl")
 
 function __init__()
@@ -77,11 +80,16 @@ end
     return reinterpret(Ptr{fieldtype(T, field)}, ptr)
 end
 
-@inline function set!(ref::Ref{T}, fieldname, val) where T
-    GC.@preserve ref begin
+# Allocate a zeroed `Ref{T}` and set the given fields
+function zeroedref(::Type{T}; kwargs...) where T
+    ref = Ref{T}()
+    memzero!(ref)
+
+    for (fieldname, val) in kwargs
         Base.unsafe_store!(unsafe_fieldptr(ref, fieldname), val)
     end
-    val
+
+    return ref
 end
 
 # Exceptions/Status
@@ -89,22 +97,11 @@ end
 uintptr_t(ptr::Ptr) = reinterpret(UInt, ptr)
 uintptr_t(status::API.ucs_status_t) = reinterpret(UInt, convert(Int, status))
 
-UCS_PTR_STATUS(ptr::Ptr{Cvoid}) = API.ucs_status_t(reinterpret(UInt, ptr)) 
+UCS_PTR_STATUS(ptr::Ptr{Cvoid}) = API.ucs_status_t(reinterpret(UInt, ptr))
 UCS_PTR_IS_ERR(ptr::Ptr{Cvoid}) = uintptr_t(ptr) >= uintptr_t(API.UCS_ERR_LAST)
 UCS_PTR_IS_PTR(ptr::Ptr{Cvoid}) = (uintptr_t(ptr) - 1) < (uintptr_t(API.UCS_ERR_LAST) - 1)
 
-struct UCXException <: Exception
-    status::API.ucs_status_t
-end
-
-macro check(ex)
-    quote
-        status = $(esc(ex))
-        if status != API.UCS_OK
-            throw(UCXException(status))
-        end
-    end
-end
+using .API: @check
 
 # Utils
 
@@ -144,12 +141,9 @@ end
 
 function query()
     field_mask = API.UCP_LIB_ATTR_FIELD_MAX_THREAD_LEVEL
-    r_attr = Ref{API.ucp_lib_attr_t}()
+    r_attr = zeroedref(API.ucp_lib_attr_t; field_mask)
 
-    memzero!(r_attr)
-    set!(r_attr, :field_mask, field_mask)
-
-    @check API.ucp_lib_query(r_attr)
+    API.ucp_lib_query(r_attr)
     r_attr[]
 end
 
@@ -162,7 +156,7 @@ mutable struct UCXConfig
 
     function UCXConfig(; kwargs...)
         r_handle = Ref{Ptr{API.ucp_config_t}}()
-        @check API.ucp_config_read(C_NULL, C_NULL, r_handle) # XXX: Prefix is broken
+        API.ucp_config_read(C_NULL, C_NULL, r_handle) # XXX: Prefix is broken
 
         config = new(r_handle[])
         finalizer(config) do config
@@ -179,7 +173,7 @@ end
 Base.unsafe_convert(::Type{Ptr{API.ucp_config_t}}, config::UCXConfig) = config.handle
 
 function Base.setindex!(config::UCXConfig, value::String, key::Union{String, Symbol})
-    @check API.ucp_config_modify(config, key, value)
+    API.ucp_config_modify(config, key, value)
     return value
 end
 
@@ -223,7 +217,7 @@ mutable struct UCXContext
             field_mask |= API.UCP_PARAM_FIELD_MT_WORKERS_SHARED
         end
 
-        features = zero(CEnum.basetype(UCX.API.ucp_feature))
+        features = zero(CEnum.basetype(API.ucp_feature))
         if wakeup
             features |= API.UCP_FEATURE_WAKEUP
         end
@@ -245,21 +239,14 @@ mutable struct UCXContext
                         API.UCP_FEATURE_RMA
         end
 
-        params = Ref{API.ucp_params}()
-        memzero!(params)
-        set!(params, :field_mask,      field_mask)
-        set!(params, :features,        features)
-
-        if shared
-            set!(params, :mt_workers_shared, true)
-        end
+        params = zeroedref(API.ucp_params; field_mask, features, mt_workers_shared=shared)
 
         config = UCXConfig(; kwargs...)
 
         r_handle = Ref{API.ucp_context_h}()
         # UCP.ucp_init is a header function so we call, UCP.ucp_init_version
-        @check API.ucp_init_version(API.UCP_API_MAJOR, API.UCP_API_MINOR,
-                                    params, config, r_handle)
+        API.ucp_init_version(API.UCP_API_MAJOR, API.UCP_API_MINOR,
+                             params, config, r_handle)
 
         context = new(r_handle[], features, parse(Dict, config))
 
@@ -292,12 +279,9 @@ end
 
 function query(ctx::UCXContext)
     field_mask = API.UCP_ATTR_FIELD_THREAD_MODE
-    r_attr = Ref{API.ucp_context_attr_t}()
+    r_attr = zeroedref(API.ucp_context_attr_t; field_mask)
 
-    memzero!(r_attr)
-    set!(r_attr, :field_mask, field_mask)
-
-    @check API.ucp_context_query(ctx, r_attr)
+    API.ucp_context_query(ctx, r_attr)
     r_attr[]
 end
 
@@ -319,21 +303,18 @@ mutable struct UCXWorker
         field_mask  = API.UCP_WORKER_PARAM_FIELD_THREAD_MODE
         thread_mode = API.UCS_THREAD_MODE_MULTI
 
-        params = Ref{API.ucp_worker_params}()
-        memzero!(params)
-        set!(params, :field_mask,  field_mask)
-        set!(params, :thread_mode, thread_mode)
+        params = zeroedref(API.ucp_worker_params; field_mask, thread_mode)
 
         @debug "Creating UCXWorker" thread_mode progress_mode
 
         r_handle = Ref{API.ucp_worker_h}()
-        @check API.ucp_worker_create(context, params, r_handle)
+        API.ucp_worker_create(context, params, r_handle)
         handle = r_handle[]
 
         # TODO: Verify that UCXContext has been created with WAKEUP
         if progress_mode === :polling
-            r_fd = Ref{API.Cint}()
-            @check API.ucp_worker_get_efd(handle, r_fd)
+            r_fd = Ref{Cint}()
+            API.ucp_worker_get_efd(handle, r_fd)
             fd = Libc.RawFD(r_fd[])
         else
             fd = RawFD(-1)
@@ -353,10 +334,7 @@ Base.unsafe_convert(::Type{API.ucp_worker_h}, worker::UCXWorker) = worker.handle
 function query(worker::UCXWorker)
     field_mask = API.UCP_WORKER_ATTR_FIELD_THREAD_MODE |
                  API.UCP_WORKER_ATTR_FIELD_MAX_AM_HEADER
-    r_attr = Ref{API.ucp_worker_attr_t}()
-
-    memzero!(r_attr)
-    set!(r_attr, :field_mask, field_mask)
+    r_attr = zeroedref(API.ucp_worker_attr_t; field_mask)
     API.ucp_worker_query(worker, r_attr)
     r_attr[]
 end
@@ -398,7 +376,7 @@ function progress(worker::UCXWorker, allow_yield=true)
 end
 
 function fence(worker::UCXWorker)
-    @check API.ucp_worker_fence(worker)
+    API.ucp_worker_fence(worker)
 end
 
 function lock_am(worker::UCXWorker)
@@ -432,7 +410,7 @@ function Base.wait(worker::UCXWorker)
             end
 
             # Wait for poll
-            status = API.ucp_worker_arm(worker)
+            status = API.unchecked_ucp_worker_arm(worker)
             if status == API.UCS_OK
                 if !isopen(worker)
                     error("UCXWorker already closed")
@@ -470,7 +448,7 @@ end
 function Base.notify(worker::UCXWorker)
     # If we don't use polling, we can't signal the worker
     if ispolling(worker)
-        @check API.ucp_worker_signal(worker)
+        API.ucp_worker_signal(worker)
     end
 end
 
@@ -534,14 +512,9 @@ function AMHandler(worker::UCXWorker, func, id)
                   API.UCP_AM_HANDLER_PARAM_FIELD_CB |
                   API.UCP_AM_HANDLER_PARAM_FIELD_ARG
 
-    params = Ref{API.ucp_am_handler_param_t}()
-    memzero!(params)
-    set!(params, :field_mask, field_mask)
-    set!(params, :id,         id)
-    set!(params, :cb,         cb)
-    set!(params, :arg,        arg)
+    params = zeroedref(API.ucp_am_handler_param_t; field_mask, id, cb, arg)
 
-    @check API.ucp_worker_set_am_recv_handler(worker, params)
+    API.ucp_worker_set_am_recv_handler(worker, params)
 end
 
 function delete_am!(worker::UCXWorker, id)
@@ -551,14 +524,9 @@ function delete_am!(worker::UCXWorker, id)
                   API.UCP_AM_HANDLER_PARAM_FIELD_CB |
                   API.UCP_AM_HANDLER_PARAM_FIELD_ARG
 
-    params = Ref{API.ucp_am_handler_param_t}()
-    memzero!(params)
-    set!(params, :field_mask, field_mask)
-    set!(params, :id,         id)
-    set!(params, :cb,         C_NULL)
-    set!(params, :arg,        C_NULL)
+    params = zeroedref(API.ucp_am_handler_param_t; field_mask, id, cb=C_NULL, arg=C_NULL)
 
-    @check API.ucp_worker_set_am_recv_handler(worker, params)
+    API.ucp_worker_set_am_recv_handler(worker, params)
 end
 
 function am_data_release(worker::UCXWorker, data)
@@ -573,7 +541,7 @@ mutable struct UCXAddress
     function UCXAddress(worker::UCXWorker)
         addr = Ref{Ptr{API.ucp_address_t}}()
         len = Ref{Csize_t}()
-        @check API.ucp_worker_get_address(worker, addr, len)
+        API.ucp_worker_get_address(worker, addr, len)
 
         this = new(worker, addr[], len[])
         finalizer(this) do addr
@@ -604,7 +572,7 @@ mutable struct UCXEndpoint
                 @async_showerr begin
                     status = API.ucp_ep_close_nb(handle, API.UCP_EP_CLOSE_MODE_FLUSH)
                     if UCS_PTR_IS_PTR(status)
-                        while API.ucp_request_check_status(status) == API.UCS_INPROGRESS
+                        while API.unchecked_ucp_request_check_status(status) == API.UCS_INPROGRESS
                             progress(worker)
                             yield()
                         end
@@ -632,15 +600,11 @@ function UCXEndpoint(worker::UCXWorker, ip::IPv4, port)
         addrlen = sizeof(IP.sockaddr_in)
         ucs_sockaddr = API.ucs_sock_addr(reinterpret(Ptr{API.sockaddr}, ptr), addrlen)
 
-        params = Ref{API.ucp_ep_params}()
-        memzero!(params)
-        set!(params, :field_mask,   field_mask)
-        set!(params, :sockaddr,     ucs_sockaddr)
-        set!(params, :flags,        flags)
+        params = zeroedref(API.ucp_ep_params; field_mask, sockaddr=ucs_sockaddr, flags)
 
         # TODO: Error callback
-    
-        @check API.ucp_ep_create(worker, params, r_handle)
+
+        API.ucp_ep_create(worker, params, r_handle)
     end
 
     UCXEndpoint(worker, r_handle[])
@@ -651,16 +615,12 @@ function UCXEndpoint(worker::UCXWorker, conn_request::UCXConnectionRequest)
                  API.UCP_EP_PARAM_FIELD_CONN_REQUEST
     flags      = API.UCP_EP_PARAMS_FLAGS_NO_LOOPBACK
 
-    params = Ref{API.ucp_ep_params}()
-    memzero!(params)
-    set!(params, :field_mask,   field_mask)
-    set!(params, :conn_request, conn_request.handle)
-    set!(params, :flags,        flags)
+    params = zeroedref(API.ucp_ep_params; field_mask, conn_request=conn_request.handle, flags)
 
     # TODO: Error callback
 
     r_handle = Ref{API.ucp_ep_h}()
-    @check API.ucp_ep_create(worker, params, r_handle)
+    API.ucp_ep_create(worker, params, r_handle)
 
     UCXEndpoint(worker, r_handle[])
 end
@@ -682,20 +642,17 @@ function _UCXEndpoint(worker::UCXWorker, addr::Ptr{API.ucp_address_t})
     field_mask = API.UCP_EP_PARAM_FIELD_REMOTE_ADDRESS
 
     r_handle = Ref{API.ucp_ep_h}()
-    params = Ref{API.ucp_ep_params}()
-    memzero!(params)
-    set!(params, :field_mask,   field_mask)
-    set!(params, :address,      addr)
+    params = zeroedref(API.ucp_ep_params; field_mask, address=addr)
 
     # TODO: Error callback
 
-    @check API.ucp_ep_create(worker, params, r_handle)
+    API.ucp_ep_create(worker, params, r_handle)
 
     UCXEndpoint(worker, r_handle[])
 end
 
 function listener_callback(conn_request_h::API.ucp_conn_request_h, args::Ptr{Cvoid})
-    conn_request = UCX.UCXConnectionRequest(conn_request_h)
+    conn_request = UCXConnectionRequest(conn_request_h)
     listener = Base.unsafe_pointer_to_objref(args)::UCXListener
     Base.invokelatest(listener.callback, listener, conn_request)
     nothing
@@ -730,13 +687,9 @@ mutable struct UCXListener
             addrlen = sizeof(IP.sockaddr_in)
             ucs_sockaddr = API.ucs_sock_addr(reinterpret(Ptr{API.sockaddr}, ptr), addrlen)
 
-            params = Ref{API.ucp_listener_params}()
-            memzero!(params)
-            set!(params, :field_mask, field_mask)
-            set!(params, :sockaddr, ucs_sockaddr)
-            set!(params, :conn_handler, conn_handler)
+            params = zeroedref(API.ucp_listener_params; field_mask, sockaddr=ucs_sockaddr, conn_handler)
 
-            @check API.ucp_listener_create(worker, params, r_handle)
+            API.ucp_listener_create(worker, params, r_handle)
         end
 
         this.handle = r_handle[]
@@ -751,7 +704,7 @@ end
 Base.unsafe_convert(::Type{API.ucp_listener_h}, listener::UCXListener) = listener.handle
 
 function reject(listener::UCXListener, conn_request::UCXConnectionRequest)
-    @check API.ucp_listener_reject(listener, conn_request.handle)
+    API.ucp_listener_reject(listener, conn_request.handle)
 end
 
 function ucp_dt_make_contig(elem_size)
@@ -772,28 +725,15 @@ mutable struct Memory
     function Memory(ctx::UCXContext, obj, addr::Ptr, length)
         field_mask = API.UCP_MEM_MAP_PARAM_FIELD_ADDRESS |
                      API.UCP_MEM_MAP_PARAM_FIELD_LENGTH
-
-        # if data === nothing
-        #     @assert addr == C_NULL
-        #     field_mask |= API.UCP_MEM_MAP_PARAM_FIELD_FLAGS
-        # end
-        
-        params = Ref{API.ucp_mem_map_params}()
-        memzero!(params)
-        set!(params, :field_mask,   field_mask)
-        set!(params, :address,      addr)
-        set!(params, :length,       length)
-        # if data === nothing
-        #     set!(params, :flags, API.UCP_MEM_MAP_NONBLOCK | API.UCP_MEM_MAP_ALLOCATE)
-        # end
+        params = zeroedref(API.ucp_mem_map_params; field_mask, address=addr, length)
 
         r_handle = Ref{API.ucp_mem_h}()
-        @check API.ucp_mem_map(ctx, params, r_handle)
+        API.ucp_mem_map(ctx, params, r_handle)
 
         base = UInt64(reinterpret(UInt, addr))
         this = new(r_handle[], ctx, base, obj)
         finalizer(this) do memory
-            API.ucp_mem_unmap(memory.ctx, memory)
+            API.unchecked_ucp_mem_unmap(memory.ctx, memory)
         end
         this
     end
@@ -806,14 +746,14 @@ end
 
 ##
 # RemoteKey
-## 
+##
 
 mutable struct RemoteKey
     handle::API.ucp_rkey_h
 
     function RemoteKey(ep::UCXEndpoint, buffer)
         r_rkey = Ref{API.ucp_rkey_h}()
-        @check API.ucp_ep_rkey_unpack(ep, buffer, r_rkey)
+        API.ucp_ep_rkey_unpack(ep, buffer, r_rkey)
         this = new(r_rkey[])
         finalizer(this) do rkey
             API.ucp_rkey_destroy(rkey)
@@ -826,7 +766,7 @@ Base.unsafe_convert(::Type{API.ucp_rkey_h}, rkey::RemoteKey) = rkey.handle
 function rkey_pack(memory::Memory)
     r_data = Ref{Ptr{Cvoid}}()
     r_size = Ref{Csize_t}()
-    @check API.ucp_rkey_pack(memory.ctx, memory, r_data, r_size)
+    API.ucp_rkey_pack(memory.ctx, memory, r_data, r_size)
     buffer = copy(unsafe_wrap(Array{UInt8}, Base.unsafe_convert(Ptr{UInt8}, r_data[]), r_size[] % Int, own=false))
     API.ucp_rkey_buffer_release(r_data[])
     return buffer
@@ -834,7 +774,7 @@ end
 
 function Base.pointer(rkey::RemoteKey, raddr::UInt64)
     r_ptr = Ref{Ptr{Cvoid}}()
-    @check API.ucp_rkey_ptr(rkey, raddr, r_ptr)
+    API.ucp_rkey_ptr(rkey, raddr, r_ptr)
     return r_ptr[]
 end
 
@@ -968,7 +908,7 @@ function send(ep::UCXEndpoint, buffer, nbytes, tag)
     end
 end
 
-function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(UCX.API.ucp_tag_t))
+function recv(worker::UCXWorker, buffer, nbytes, tag, tag_mask=~zero(API.ucp_tag_t))
     dt = ucp_dt_make_contig(1) # since we are receiving nbytes
     request = UCXRequest(worker, buffer) # rooted through worker
     cb = @cfunction(recv_callback, Cvoid, (Ptr{Cvoid}, API.ucs_status_t, Ptr{API.ucp_tag_recv_info_t}, Ptr{Cvoid}))
@@ -1204,17 +1144,17 @@ end
 tag(kind, seed, port) = hash(kind, hash(seed, hash(port)))
 
 function Endpoint(worker::Worker, addr, port)
-    ep = UCX.UCXEndpoint(worker.worker, addr, port)
+    ep = UCXEndpoint(worker.worker, addr, port)
     Endpoint(worker, ep, false)
 end
 
 function Endpoint(worker::Worker, connection::UCXConnectionRequest)
-    ep = UCX.UCXEndpoint(worker.worker, connection)
+    ep = UCXEndpoint(worker.worker, connection)
     Endpoint(worker, ep, true)
 end
 
 function Endpoint(worker::Worker, ep::UCXEndpoint, listener)
-    seed = rand(UInt128) 
+    seed = rand(UInt128)
     pid = getpid()
     msg_tag = tag(:ctrl, seed, pid)
 

@@ -4,6 +4,7 @@ output_file_path = "../src/api.jl"
 smart_de_anonymize = true
 use_deterministic_symbol = true
 prologue_file_path = "./prologue.jl"
+epilogue_file_path = "./epilogue.jl"
 module_name = "API"
 
 [codegen]
