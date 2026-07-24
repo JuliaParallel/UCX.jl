@@ -294,8 +294,11 @@ mutable struct UCXWorker
     fd::RawFD
     context::UCXContext
     inflight::IdDict{Any, Nothing} # IdSet -- Can't use UCXRequest since that is defined after
+
     am_handlers::Dict{UInt16, Any}
-    in_amhandler::Vector{Bool}
+    @atomic in_amhandler::Vector{Threads.Atomic{Bool}}
+    in_amhandler_lock::ReentrantLock
+
     open::Bool
     mode::Symbol
 
@@ -320,7 +323,16 @@ mutable struct UCXWorker
             fd = RawFD(-1)
         end
 
-        worker = new(handle, fd, context, IdDict{Any,Nothing}(), Dict{UInt16, Any}(), fill(false, Threads.maxthreadid()), true, progress_mode)
+        worker = new(handle,
+                     fd,
+                     context,
+                     IdDict{Any,Nothing}(),
+                     Dict{UInt16, Any}(),
+                     [Threads.Atomic{Bool}(false) for _ in 1:Threads.maxthreadid()],
+                     ReentrantLock(),
+                     true,
+                     progress_mode)
+
         finalizer(worker) do worker
             worker.open = false
             @assert isempty(worker.inflight)
@@ -351,6 +363,35 @@ ispolling(worker::UCXWorker) = worker.fd != RawFD(-1)
 progress_mode(worker::UCXWorker) = worker.mode
 context(worker::UCXWorker) = worker.context
 
+function in_amhandler(worker::UCXWorker)
+    tid = Threads.threadid()
+
+    # First do a fast check to see if we currently track the tid
+    v = @atomic worker.in_amhandler
+    if length(v) < tid
+        # If not, lock and recheck to avoid TOCTOU races
+        @lock worker.in_amhandler_lock begin
+            v = @atomic worker.in_amhandler
+
+            if length(v) < tid
+                # Note that we don't deepcopy the vector so that any concurrent
+                # writes to existing elements are preserved, since the new
+                # vector will hold the same Atomic{Bool} objects as the old one.
+                new_v = copy(v)
+                resize!(new_v, tid)
+                for i in (length(v) + 1):tid
+                    new_v[i] = Threads.Atomic{Bool}(false)
+                end
+
+                @atomic worker.in_amhandler = new_v
+                v = new_v
+            end
+        end
+    end
+
+    return v[tid]
+end
+
 """
     progress(worker::UCXWorker)
 
@@ -361,7 +402,7 @@ Returns `true` if progress was made, `false` if no work was waiting.
 """
 function progress(worker::UCXWorker, allow_yield=true)
     tid = Threads.threadid()
-    if worker.in_amhandler[tid]
+    if in_amhandler(worker)[]
         @debug """
         UCXWorker is processing a Active Message on this thread
         Calling `progress` is not permitted and leads to recursion.
@@ -380,19 +421,19 @@ function fence(worker::UCXWorker)
 end
 
 function lock_am(worker::UCXWorker)
-    tid = Threads.threadid()
-    if worker.in_amhandler[tid]
+    slot = in_amhandler(worker)
+    if slot[]
         error("UCXWorker already in AMHandler on this thread! Concurrency violation.")
     end
-    worker.in_amhandler[tid] = true
+    slot[] = true
 end
 
 function unlock_am(worker::UCXWorker)
-    tid = Threads.threadid()
-    if !worker.in_amhandler[tid]
+    slot = in_amhandler(worker)
+    if !slot[]
         error("UCXWorker is not in AMHandler on this thread! Concurrency violation.")
     end
-    worker.in_amhandler[tid] = false
+    slot[] = false
 end
 
 include("idle.jl")
@@ -475,6 +516,9 @@ end
   - `reply_ep::API.ucp_ep_h`
   - `flags::Cuint`
 
+!!! danger
+    Yielding within `func` is *not* threadsafe and may cause crashes.
+
 ## Return values
 The callback `func` needs to return either `UCX.API.UCS_OK` or `UCX.API.UCS_INPROGRESS`.
 If it returns `UCX.API.UCS_INPROGRESS` it **must** call `am_data_release(worker, data)`,
@@ -487,8 +531,15 @@ end
 
 function am_recv_callback(arg::Ptr{Cvoid}, header::Ptr{Cvoid}, header_length::Csize_t, data::Ptr{Cvoid}, length::Csize_t, param::Ptr{API.ucp_am_recv_param_t})::API.ucs_status_t
     handler = Base.unsafe_pointer_to_objref(arg)::AMHandler
+
     try
         lock_am(handler.worker)
+    catch err
+        showerror(stderr, err, catch_backtrace())
+        return API.UCS_OK
+    end
+
+    try
         return handler.func(handler.worker, header, header_length, data, length, param)::API.ucs_status_t
     catch err
         showerror(stderr, err, catch_backtrace())
